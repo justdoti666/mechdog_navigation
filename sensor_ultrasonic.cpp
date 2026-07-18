@@ -199,34 +199,32 @@ UltrasonicArrayData UltrasonicArrayDriver::read_all() {
     default_reading.distance_cm = 400.0;
     default_reading.valid = false;
 
-    // 并行读取（用线程模拟并行）
-    std::vector<std::thread> threads;
-    std::unordered_map<std::string, UltrasonicReading> results;
-    std::mutex result_mutex;
+    // 互斥锁防止外部并发调用
+    std::lock_guard<std::mutex> lock(read_mutex_);
 
-    for (const auto& kv : sensors_) {
-        const auto& name   = kv.first;
-        const auto& sensor = kv.second;
-        threads.emplace_back([&results, &result_mutex, &sensor, name]() {
-            auto reading = sensor->measure();
-            std::lock_guard<std::mutex> lock(result_mutex);
-            results[name] = reading;
-        });
-    }
+    // 分时轮询：固定顺序依次触发，每颗间隔 30ms 避免串扰
+    // 原因：HC-SR04 最大回波时间 ~25ms，间隔 ≥30ms 确保前一颗回波完全衰减
+    // 4 颗完整一轮 ~120ms → 更新率约 8Hz，步行速度足够
+    static constexpr double CROSSTALK_GAP_MS = 30.0;
 
-    for (auto& t : threads) {
-        if (t.joinable()) t.join();
-    }
-
-    auto get_or = [&](const std::string& key) -> UltrasonicReading {
-        auto it = results.find(key);
-        return it != results.end() ? it->second : default_reading;
+    auto read_sensor = [&](const std::string& key) -> UltrasonicReading {
+        auto it = sensors_.find(key);
+        if (it == sensors_.end()) return default_reading;
+        return it->second->measure();
     };
 
-    data.front_left   = get_or("front_left");
-    data.front_center = get_or("front_center");
-    data.front_right  = get_or("front_right");
-    data.bottom       = get_or("bottom");
+    // 底部传感器先读（结果不受声波串扰影响，方向不同）
+    data.bottom       = read_sensor("bottom");
+    std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(CROSSTALK_GAP_MS));
+
+    // 前向三颗依次轮询
+    data.front_center = read_sensor("front_center");
+    std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(CROSSTALK_GAP_MS));
+
+    data.front_left   = read_sensor("front_left");
+    std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(CROSSTALK_GAP_MS));
+
+    data.front_right  = read_sensor("front_right");
 
     return data;
 }
