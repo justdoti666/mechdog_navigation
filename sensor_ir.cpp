@@ -71,7 +71,10 @@ double InfraRedSensor::read_normalized_light() {
         return simulate_ir();
     }
 #ifdef __linux__
+    // 修复D3: 读取失败返回 -1.0, 调用方应回退到安全侧(室外/超声波主导),
+    // 而不是返回 0.0 被当成"室内"给深度相机最高权重
     double raw = read_ir_raw();
+    if (raw < 0) return -1.0;
     double norm = raw / static_cast<double>(IR_MAX_REF);
     return std::clamp(norm, 0.0, 1.0);
 #else
@@ -90,7 +93,9 @@ double InfraRedSensor::read_ir_raw() {
     // 连续读 TSL2591_READ_REPEAT 次取平均, 抗瞬时抖动
     double sum = 0.0;
     for (int i = 0; i < TSL2591_READ_REPEAT; ++i) {
-        sum += tsl2591_read_ir();
+        double v = tsl2591_read_ir();
+        if (v < 0) return -1.0;  // 任一读取失败, 整次判失败
+        sum += v;
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     return sum / static_cast<double>(TSL2591_READ_REPEAT);
@@ -139,12 +144,12 @@ bool InfraRedSensor::tsl2591_init() {
     return true;
 }
 
-uint16_t InfraRedSensor::tsl2591_read_ir() {
+int InfraRedSensor::tsl2591_read_ir() {
     uint8_t buf[2] = {0, 0};
     if (!i2c_read_reg(TSL2591_REG_CHAN1, buf, 2)) {
-        return 0;
+        return -1;  // 读取失败
     }
-    return static_cast<uint16_t>(buf[1] << 8 | buf[0]);
+    return static_cast<int>(buf[1] << 8 | buf[0]);
 }
 
 // 底层: 用裸 ioctl(I2C_SMBUS) 实现, 不依赖 i2c_smbus_* 内联 helper (部分内核头文件版本不导出)

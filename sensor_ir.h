@@ -44,7 +44,7 @@ public:
     explicit InfraRedSensor(bool use_simulated = true);
     ~InfraRedSensor();
 
-    /** 读取归一化环境红外强度: 0.0(暗) ~ 1.0(强红外) */
+    /** 读取归一化环境红外强度: 0.0(暗) ~ 1.0(强红外); 返回 -1.0 表示读取失败 */
     double read_normalized_light();
 
 private:
@@ -61,7 +61,7 @@ private:
     bool i2c_open();
     void i2c_close();
     bool tsl2591_init();
-    uint16_t tsl2591_read_ir(); // 读 CHAN1 (infrared) 通道
+    int tsl2591_read_ir();      // 读 CHAN1 (infrared) 通道; 返回 -1 表示失败
     bool i2c_write_reg(uint8_t reg, uint8_t value);
     bool i2c_read_reg(uint8_t reg, uint8_t* out, uint8_t len);
 #endif

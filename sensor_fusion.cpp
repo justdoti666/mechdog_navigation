@@ -82,7 +82,11 @@ FusionResult SensorFusion::fuse() {
 EnvironmentType SensorFusion::determine_environment(const AstraFrame& frame) {
     // 修复(F3): 环境判定改用 TSL2591 实测红外强度(设计意图), 而非深度图无效像素比估算
     if (ir_) {
-        double light = ir_->read_normalized_light();  // 0.0~1.0
+        double light = ir_->read_normalized_light();  // 0.0~1.0; -1.0 = 读取失败
+        if (light < 0) {
+            // 修复D3: 红外传感器故障时回退室外(超声波主导), 安全侧
+            return EnvironmentType::OUTDOOR;
+        }
         if (light <= IrConfig::ir_indoor_max)  return EnvironmentType::INDOOR;
         if (light >= IrConfig::ir_outdoor_min) return EnvironmentType::OUTDOOR;
         return EnvironmentType::SEMI_INDOOR;
@@ -129,9 +133,9 @@ FusedObstacle SensorFusion::fuse_direction(
     FusedObstacle obs;
     obs.direction = direction;
 
-    // 获取超声波读数
+    // 获取超声波读数 (修复D1: 必须检查 valid —— 真机超时返回 -1.0, 不查 valid 会被 L0 误判为超近距离障碍)
     const auto* ultra_reading = get_ultrasonic_reading(ultra_data, direction);
-    double ultra_dist_m = ultra_reading
+    double ultra_dist_m = (ultra_reading && ultra_reading->valid)
         ? ultra_reading->distance_cm * kCmToM : 4.5;
 
     // 获取 Astra 读数
@@ -183,15 +187,17 @@ std::pair<double, std::string> SensorFusion::layer_fusion(
     double ultra_m, double astra_m, bool astra_valid,
     double astra_w, double ultra_w) {
 
-    // L0: 超声盲区补偿
-    if (ultra_m < 0.6) {
+    // L0: 超声盲区补偿 (修复D2: 仅当超声有效且为合理正值时才进入盲区分支,
+    // 否则负距离/无效值会被当成超近障碍触发假性急停)
+    if (ultra_m >= 0.02 && ultra_m < 0.6) {
         std::ostringstream oss;
         oss << "仅超声波 (Astra盲区,超声=" << std::fixed << std::setprecision(1)
             << ultra_m * 100 << "cm)";
         return {ultra_m, oss.str()};
     }
 
-    bool ultra_valid = (ultra_m < 4.5);
+    // 有效区间: [0.02m(2cm), 4.5m)
+    bool ultra_valid = (ultra_m >= 0.02) && (ultra_m < 4.5);
 
     if (!astra_valid) {
         if (ultra_valid) {
@@ -239,8 +245,11 @@ std::pair<double, std::string> SensorFusion::layer_fusion(
 double SensorFusion::calc_confidence(
     double ultra_m, double astra_m, bool astra_valid,
     double astra_w, double ultra_w) {
+    // 修复D2: 超声有效区间统一为 [0.02m, 4.5m)
+    const bool ultra_valid = (ultra_m >= 0.02) && (ultra_m < 4.5);
+
     if (!astra_valid) {
-        if (ultra_m < 4.5) {
+        if (ultra_valid) {
             if (ultra_m < 0.6)      return 0.95;
             else if (ultra_m < 2.0) return 0.85;
             else                    return 0.70;
@@ -250,7 +259,7 @@ double SensorFusion::calc_confidence(
 
     double diff = std::abs(ultra_m - astra_m);
     double consistency = std::max(0.0, 1.0 - diff / 2.0);
-    double base_confidence = (ultra_m < 4.5) ? 0.95 : 0.8;
+    double base_confidence = ultra_valid ? 0.95 : 0.8;
     return base_confidence * consistency;
 }
 
