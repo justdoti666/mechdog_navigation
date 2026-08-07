@@ -134,7 +134,7 @@ cmake --build .
 | 深度相机 | 奥比中光 Astra Pro | 1 |
 | 超声波传感器 | HC-SR04 | 4 |
 | 环境红外检测 | TSL2591 模块 (I2C 0x29) | 1 |
-| 主控 | Raspberry Pi 4B+ | 1 |
+| 主控 | Raspberry Pi 5B| 1 |
 
 ## 已知限制
 
