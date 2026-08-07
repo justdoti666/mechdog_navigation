@@ -8,6 +8,10 @@
 #include <thread>
 #include <chrono>
 
+#ifdef USE_ASTRA_SDK
+#include <astra/astra.hpp>
+#endif
+
 namespace mechdog {
 
 AstraProDriver::AstraProDriver(bool use_simulated)
@@ -53,13 +57,79 @@ AstraFrame AstraProDriver::capture_frame() {
     if (use_simulated_) {
         return simulate_frame();
     }
-    // 真实硬件模式需 OpenNI2 SDK
+#ifdef USE_ASTRA_SDK
+    return capture_real();
+#else
+    // 未编译 Astra SDK 支持时返回无效帧
     AstraFrame frame;
     frame.timestamp = std::chrono::duration<double>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     frame.valid = false;
     return frame;
+#endif
 }
+
+#ifdef USE_ASTRA_SDK
+// ========== 真机模式 (Astra SDK) ==========
+AstraFrame AstraProDriver::capture_real() {
+    // 静态初始化 Astra SDK (仅一次; 多实例安全)
+    static bool astra_inited = []() {
+        astra::initialize();
+        return true;
+    }();
+
+    static astra::StreamSet streamSet;
+    static astra::StreamReader reader = streamSet.create_reader();
+    static bool stream_started = false;
+
+    if (!stream_started) {
+        auto depthStream = reader.stream<astra::DepthStream>();
+        depthStream.start();
+        stream_started = true;
+        std::cout << "[Astra] 真机深度流已启动, serial="
+                  << depthStream.serial_number() << std::endl;
+    }
+
+    // 更新 Astra 内部状态, 触发帧回调
+    astra_update();
+
+    AstraFrame frame;
+    frame.timestamp = std::chrono::duration<double>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    frame.depth_width  = DEPTH_WIDTH;
+    frame.depth_height = DEPTH_HEIGHT;
+
+    // 读取最新深度帧 (StreamReader::get_latest_frame 轮询模式, 无需 FrameListener)
+    auto depthStream = reader.stream<astra::DepthStream>();
+    astra::Frame latest = reader.get_latest_frame();
+    astra::DepthFrame depthFrame = latest.get<astra::DepthFrame>();
+
+    if (depthFrame.is_valid() && depthFrame.width() > 0) {
+        frame.depth_map.resize(depthFrame.length());
+        depthFrame.copy_to(reinterpret_cast<int16_t*>(frame.depth_map.data()));
+        frame.valid = true;
+    } else {
+        frame.valid = false;
+        return frame;
+    }
+
+    // 区域分析
+    frame.center_region = analyze_region(frame.depth_map, frame.depth_width,
+                                         frame.depth_height, "center");
+    frame.left_region   = analyze_region(frame.depth_map, frame.depth_width,
+                                         frame.depth_height, "left");
+    frame.right_region  = analyze_region(frame.depth_map, frame.depth_width,
+                                         frame.depth_height, "right");
+
+    // 环境判定: 深度图无效像素比例代理 (F3 决策: 默认 estimate_ambient_light)
+    frame.ambient_light_level = estimate_ambient_light(frame.depth_map,
+                                                       frame.depth_width,
+                                                       frame.depth_height);
+    frame.environment = classify_environment(frame.ambient_light_level);
+
+    return frame;
+}
+#endif // USE_ASTRA_SDK
 
 AstraFrame AstraProDriver::get_latest_frame() const {
     std::lock_guard<std::mutex> guard(lock_);

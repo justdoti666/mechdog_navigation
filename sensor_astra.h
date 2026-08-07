@@ -1,7 +1,7 @@
 ﻿/**
  * Astra Pro 深度相机驱动模块 (C++ 版)
  * 基于奥比中光 Astra Pro (单目结构光)
- * 通过 OpenNI2 获取深度图/RGB图
+ * 通过 Astra SDK (astra:: API) 获取深度图 (真机模式) / 模拟生成 (模拟模式)
  */
 #pragma once
 
@@ -89,6 +89,9 @@ private:
 
     void capture_loop();
     AstraFrame simulate_frame();
+
+    // 真机模式 (Astra SDK, 仅 USE_ASTRA_SDK 编译时启用)
+    AstraFrame capture_real();
 
     DepthRegion analyze_region(const std::vector<uint16_t>& depth_map,
                                int width, int height, const std::string& region);
