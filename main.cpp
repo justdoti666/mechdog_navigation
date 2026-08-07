@@ -22,15 +22,25 @@
 #include <iostream>
 #include <thread>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 using namespace mechdog;
 
 static volatile std::sig_atomic_t g_stop = 0;
 void on_signal(int) { g_stop = 1; }
 
 int main() {
+#ifdef _WIN32
+    // Windows 控制台默认 GBK(936), 而源码/输出是 UTF-8 → 中文乱码
+    // 设置控制台输出代码页为 UTF-8 (需配合 chcp 65001 或此调用)
+    SetConsoleOutputCP(CP_UTF8);
+#endif
     std::signal(SIGINT, on_signal);
 
     // 模拟模式 (真机时: AstraProDriver astra(false); InfraRedSensor ir(false);)
+    // 注: F2 真机验证时临时改为 false 并已确认 capture_real() 出图正常 (见 commit ed345af)
     AstraProDriver astra(/*use_simulated=*/true);
     UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
     InfraRedSensor ir(/*use_simulated=*/true);
