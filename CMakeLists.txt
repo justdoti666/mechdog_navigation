@@ -18,11 +18,15 @@ if(USE_WIRINGPI)
     find_library(WIRINGPI_LIB wiringPi REQUIRED)
 endif()
 
+# std::thread 依赖线程库（模拟模式同样使用 Astra 采集线程）
+find_package(Threads REQUIRED)
+
 # 源文件
 set(SOURCES
     main.cpp
     sensor_ultrasonic.cpp
     sensor_astra.cpp
+    sensor_ir.cpp
     sensor_fusion.cpp
     path_planner.cpp
 )
@@ -39,13 +43,22 @@ endif()
 
 if(USE_WIRINGPI)
     target_link_libraries(${PROJECT_NAME} PRIVATE ${WIRINGPI_LIB})
-    target_link_libraries(${PROJECT_NAME} PRIVATE pthread)
 endif()
+
+target_link_libraries(${PROJECT_NAME} PRIVATE Threads::Threads)
 
 # 模拟模式（Windows/PC开发）
 if(NOT USE_WIRINGPI AND NOT USE_OPENNI2)
     message(STATUS "=== 模拟模式: 所有传感器使用模拟数据 ===")
 endif()
+
+# 单元测试（F13）
+enable_testing()
+add_executable(test_fusion tests/test_fusion.cpp
+    sensor_ultrasonic.cpp sensor_astra.cpp sensor_ir.cpp sensor_fusion.cpp)
+target_include_directories(test_fusion PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_fusion PRIVATE Threads::Threads)
+add_test(NAME fusion_tests COMMAND test_fusion)
 
 # 安装
 install(TARGETS ${PROJECT_NAME} DESTINATION bin)

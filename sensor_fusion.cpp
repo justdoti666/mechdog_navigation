@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 多传感器数据融合模块实现
  */
 
@@ -10,19 +10,16 @@
 #include <sstream>
 #include <iomanip>
 #include <chrono>
-#include <boost/optional.hpp>
+#include <optional>
 
 namespace mechdog {
 
-SensorFusion::SensorFusion(AstraProDriver* astra, UltrasonicArrayDriver* ultrasonic)
-    : astra_(astra), ultrasonic_(ultrasonic) {
-    distance_history_["left"]   = {};
-    distance_history_["center"] = {};
-    distance_history_["right"]  = {};
-    distance_history_["bottom"] = {};
+SensorFusion::SensorFusion(AstraProDriver* astra, UltrasonicArrayDriver* ultrasonic,
+                           InfraRedSensor* ir)
+    : astra_(astra), ultrasonic_(ultrasonic), ir_(ir) {
 }
 
-boost::optional<FusionResult> SensorFusion::get_latest_result() const {
+std::optional<FusionResult> SensorFusion::get_latest_result() const {
     return last_fusion_;
 }
 
@@ -83,6 +80,14 @@ FusionResult SensorFusion::fuse() {
 
 // ========== 环境判断 ==========
 EnvironmentType SensorFusion::determine_environment(const AstraFrame& frame) {
+    // 修复(F3): 环境判定改用 TSL2591 实测红外强度(设计意图), 而非深度图无效像素比估算
+    if (ir_) {
+        double light = ir_->read_normalized_light();  // 0.0~1.0
+        if (light <= IrConfig::ir_indoor_max)  return EnvironmentType::INDOOR;
+        if (light >= IrConfig::ir_outdoor_min) return EnvironmentType::OUTDOOR;
+        return EnvironmentType::SEMI_INDOOR;
+    }
+    // 无红外传感器时回退: 帧无效视为室外(超声波主导, 安全侧)
     if (!frame.valid) {
         return EnvironmentType::OUTDOOR;
     }
@@ -91,7 +96,8 @@ EnvironmentType SensorFusion::determine_environment(const AstraFrame& frame) {
 
 std::pair<double, double> SensorFusion::get_adaptive_weights(
     EnvironmentType env_type, const AstraFrame& frame) {
-    const auto& base = get_environment_weights().at(env_to_key(env_type));
+    // 修复(F6): 值拷贝而非引用 —— 原代码对 get_environment_weights() 返回的临时 map 取引用, 是悬垂引用(UB)
+    auto base = get_environment_weights().at(env_to_key(env_type));
     double astra_w = base.astra;
     double ultra_w = base.ultrasonic;
 

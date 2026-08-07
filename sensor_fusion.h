@@ -1,16 +1,16 @@
-/**
+﻿/**
  * 多传感器数据融合模块 (C++ 版)
- * 融合 Astra Pro 深度相机 + HC-SR04 超声波传感器阵列
+ * 融合 Astra Pro 深度相机 + HC-SR04 超声波传感器阵列 + TSL2591 环境红外
  */
 #pragma once
 
 #include "config.h"
 #include "sensor_ultrasonic.h"
 #include "sensor_astra.h"
+#include "sensor_ir.h"
+#include <optional>
 #include <string>
 #include <unordered_map>
-#include <boost/optional.hpp>
-#include <vector>
 
 namespace mechdog {
 
@@ -61,27 +61,26 @@ struct FusionResult {
  * 传感器融合核心类
  *
  * 使用方式:
- *   SensorFusion fusion(astra_driver, ultrasonic_driver);
+ *   SensorFusion fusion(&astra_driver, &ultrasonic_driver, &ir_sensor);
  *   auto result = fusion.fuse();
  */
 class SensorFusion {
 public:
-    SensorFusion(AstraProDriver* astra, UltrasonicArrayDriver* ultrasonic);
+    SensorFusion(AstraProDriver* astra, UltrasonicArrayDriver* ultrasonic,
+                 InfraRedSensor* ir);
 
     /** 执行一次传感器融合 */
     FusionResult fuse();
 
     /** 获取最近一次融合结果 */
-    boost::optional<FusionResult> get_latest_result() const;
+    std::optional<FusionResult> get_latest_result() const;
 
 private:
     AstraProDriver* astra_;
     UltrasonicArrayDriver* ultrasonic_;
-    boost::optional<FusionResult> last_fusion_;
+    InfraRedSensor* ir_;
 
-    // 滑动平均缓存
-    std::unordered_map<std::string, std::vector<double>> distance_history_;
-    static constexpr int kHistoryMaxLen = 5;
+    std::optional<FusionResult> last_fusion_;
 
     static constexpr double kCmToM = 0.01;
 

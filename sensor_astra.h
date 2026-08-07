@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Astra Pro 深度相机驱动模块 (C++ 版)
  * 基于奥比中光 Astra Pro (单目结构光)
  * 通过 OpenNI2 获取深度图/RGB图
@@ -77,9 +77,6 @@ public:
 
     /** 获取最新帧（线程安全） */
     AstraFrame get_latest_frame() const;
-
-    /** 获取三个方向的障碍物距离 */
-    std::unordered_map<std::string, double> get_obstacle_distances() const;
 
 private:
     bool use_simulated_;

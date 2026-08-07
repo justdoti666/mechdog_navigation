@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 超声波传感器驱动模块实现 (HC-SR04)
  */
 #include "sensor_ultrasonic.h"
@@ -18,34 +18,23 @@ namespace mechdog {
 // ============================================================
 
 double UltrasonicArrayData::get_min_forward_distance_cm() const {
-    return std::min({front_left.distance_cm, front_center.distance_cm, front_right.distance_cm});
+    // 修复(F5): 过滤无效读数(真机超时返回 -1.0), 避免参与 min 后触发假性急停
+    double best = 400.0;  // 量程上限
+    bool any_valid = false;
+    for (const auto* r : {&front_left, &front_center, &front_right}) {
+        if (r->valid) {
+            any_valid = true;
+            best = std::min(best, r->distance_cm);
+        }
+    }
+    return any_valid ? best : 400.0;
 }
 
 bool UltrasonicArrayData::get_cliff_detected() const {
     // 底部传感器读数 > 30cm 认为有跌落风险
-    return bottom.distance_cm > 30.0;
-}
-
-std::string UltrasonicArrayData::get_available_direction() const {
-    const double threshold = 30.0;  // 30cm 以内认为有障碍
-    std::unordered_map<std::string, double> dirs = {
-        {"center", front_center.distance_cm},
-        {"left",   front_left.distance_cm},
-        {"right",  front_right.distance_cm},
-    };
-
-    std::string best_dir = "center";
-    double      best_val = 0.0;
-    for (const auto& kv : dirs) {
-        if (kv.second > best_val) {
-            best_val = kv.second;
-            best_dir = kv.first;
-        }
-    }
-
-    if (dirs[best_dir] < threshold)
-        return "";  // 全堵死
-    return best_dir;
+    // 修复(F4): 必须检查 valid —— 真机超时返回 -1.0, 若只看数值会被判"安全",
+    // 而回波超时往往正是量程内无可反射地面(深坑/大台阶), 应默认判为有风险
+    return !bottom.valid || bottom.distance_cm > 30.0;
 }
 
 // ============================================================
@@ -84,23 +73,21 @@ void UltrasonicSensor::cleanup() {
 }
 
 UltrasonicReading UltrasonicSensor::measure() {
+    // 修复(F7): 直接保存 steady_clock::time_point 做差值, 修复原"存纳秒计数当秒读"的单位错乱
     auto now = std::chrono::steady_clock::now();
-    double elapsed = std::chrono::duration<double>(
-        now - std::chrono::steady_clock::time_point(
-            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                std::chrono::duration<double>(last_measure_time_)))).count();
-
-    if (elapsed < MIN_INTERVAL_SEC) {
-        std::this_thread::sleep_for(
-            std::chrono::duration<double>(MIN_INTERVAL_SEC - elapsed));
+    if (last_measure_.time_since_epoch().count() != 0) {
+        auto elapsed = now - last_measure_;
+        if (elapsed < std::chrono::duration<double>(MIN_INTERVAL_SEC)) {
+            std::this_thread::sleep_for(
+                std::chrono::duration<double>(MIN_INTERVAL_SEC) - elapsed);
+        }
     }
 
     double timestamp = std::chrono::duration<double>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     double distance_cm = measure_distance();
 
-    last_measure_time_ = std::chrono::duration<double>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
+    last_measure_ = std::chrono::steady_clock::now();
 
     bool valid = (distance_cm >= 2.0) && (distance_cm <= 400.0);
 

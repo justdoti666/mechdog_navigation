@@ -1,16 +1,17 @@
-/**
+﻿/**
  * 超声波传感器驱动模块 (HC-SR04)
  * 4颗传感器阵列, 通过 GPIO (Trig/Echo) 接口
  */
 #pragma once
 
 #include "config.h"
-#include <string>
-#include <unordered_map>
+#include <chrono>
 #include <memory>
-#include <thread>
 #include <mutex>
 #include <random>
+#include <string>
+#include <thread>
+#include <unordered_map>
 
 namespace mechdog {
 
@@ -37,9 +38,6 @@ struct UltrasonicArrayData {
 
     /** 检测是否处于悬崖/台阶边缘 */
     bool get_cliff_detected() const;
-
-    /** 根据前方传感器判断哪个方向有空间 */
-    std::string get_available_direction() const;
 };
 
 /** 单个超声波传感器驱动 */
@@ -65,7 +63,7 @@ private:
     int         echo_pin_;
     double      yaw_offset_deg_;
     double      pitch_offset_deg_;
-    double      last_measure_time_ = 0.0;
+    std::chrono::steady_clock::time_point last_measure_{};  // 上次测量时刻 (修复: 原 double 存纳秒计数被当秒读, 单位错乱)
     std::mt19937 rng_;  // 模拟模式用
 
 #ifdef USE_WIRINGPI

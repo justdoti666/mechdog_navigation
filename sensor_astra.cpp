@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Astra Pro 深度相机驱动模块实现
  */
 #include "sensor_astra.h"
@@ -64,18 +64,6 @@ AstraFrame AstraProDriver::capture_frame() {
 AstraFrame AstraProDriver::get_latest_frame() const {
     std::lock_guard<std::mutex> guard(lock_);
     return latest_frame_;
-}
-
-std::unordered_map<std::string, double> AstraProDriver::get_obstacle_distances() const {
-    auto frame = get_latest_frame();
-    if (!frame.valid) {
-        return {{"left", 8.0}, {"center", 8.0}, {"right", 8.0}};
-    }
-    return {
-        {"left",   frame.left_region.min_distance_m},
-        {"center", frame.center_region.min_distance_m},
-        {"right",  frame.right_region.min_distance_m}
-    };
 }
 
 // ========== 模拟深度帧 ==========

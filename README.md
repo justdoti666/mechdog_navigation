@@ -1,6 +1,6 @@
-# mechdog_navigation
+﻿# mechdog_navigation
 
-机械狗导航系统 —— 基于 Astra Pro 深度相机 + HC-SR04 超声波传感器阵列的多传感器融合寻路方案。
+机械狗导航系统 —— 基于 Astra Pro 深度相机 + HC-SR04 超声波传感器阵列 + TSL2591 环境红外检测的多传感器融合寻路方案。
 
 ## 项目简介
 
@@ -36,8 +36,11 @@
 |------|------|------|
 | 全局配置 | `config.h` | 传感器参数、融合分层策略、地图参数、规划参数、紧急避障阈值 |
 | 超声波驱动 | `sensor_ultrasonic.h/.cpp` | HC-SR04 驱动，4 颗分时轮询防串扰（含模拟模式） |
-| 深度相机驱动 | `sensor_astra.h/.cpp` | Astra Pro 驱动，通过 OpenNI2 获取深度图（含模拟模式） |
+| 深度相机驱动 | `sensor_astra.h/.cpp` | Astra Pro 驱动，通过 OpenNI2 获取深度图（含模拟模式；**OpenNI2 真机接口待实现**） |
+| 红外强度驱动 | `sensor_ir.h/.cpp` | TSL2591 环境红外检测，用于环境自适应权重（含模拟模式） |
 | 传感器融合 | `sensor_fusion.h/.cpp` | 分层加权融合、环境自适应、障碍物分类、导航决策 |
+| 路径规划 | `path_planner.h/.cpp` | 导航动作 -> 速度指令映射（DWA 待实现） |
+| 单元测试 | `tests/test_fusion.cpp` | F4/F5 回归 + 融合逻辑验证 (`ctest`) |
 
 ## 传感器融合策略
 
@@ -57,6 +60,8 @@
 | 室内 (indoor) | 0.8 | 0.2 | 无阳光干扰，结构光最佳 |
 | 半室内 (semi_indoor) | 0.5 | 0.5 | 走廊/棚下/窗边，需超声波补充 |
 | 室外 (outdoor) | 0.1 | 0.9 | 阳光干扰严重，超声波主导 |
+
+环境判定输入为 **TSL2591 实测红外强度**（归一化 0~1），阈值见 `config.h` 的 `IrConfig`。默认值为预设值，**标定流程见 `docs/IR_CALIBRATION.md`**（由硬件组执行）。
 
 ### 超声波分时轮询
 
@@ -80,8 +85,17 @@
 
 - **CMake** >= 3.16
 - **C++17** 编译器 (GCC 8+ / Clang 7+)
-- **OpenNI2**（可选，Astra Pro 真实硬件模式）
-- **WiringPi**（可选，树莓派 GPIO 模式）
+- **OpenNI2**（可选，Astra Pro 真实硬件模式，**接口待实现**）
+- **WiringPi**（可选，树莓派 GPIO 模式；注意原版已停止维护，建议使用社区 fork `github.com/WiringPi/WiringPi`）
+- **Linux i2c-dev**（可选，TSL2591 真机模式）
+
+## 单元测试
+
+```bash
+# 构建并运行测试（F4 悬崖安全 / F5 读数过滤 / 融合逻辑）
+cmake --build . --target test_fusion
+ctest --output-on-failure
+```
 
 ## 构建
 
@@ -119,7 +133,14 @@ cmake --build .
 |------|------|------|
 | 深度相机 | 奥比中光 Astra Pro | 1 |
 | 超声波传感器 | HC-SR04 | 4 |
+| 环境红外检测 | TSL2591 模块 (I2C 0x29) | 1 |
 | 主控 | Raspberry Pi 4B+ | 1 |
+
+## 已知限制
+
+1. **OpenNI2 真机接口待实现** — 当前 `USE_OPENNI2` 仅用于编译开关，`capture_frame()` 真机分支返回无效帧，深度数据全部来自模拟模式
+2. **环境红外阈值待标定** — `IrConfig` 为软件预设默认值，需硬件组按 `docs/IR_CALIBRATION.md` 实测后更新
+3. **wiringPi 真机 GPIO 未验证** — `measure_distance()` 的轮询实现受 Linux 调度抖动影响（1ms ≈ 17cm），后续可改边沿中断+时间戳
 
 ## 注意事项
 
@@ -131,3 +152,4 @@ cmake --build .
 ## License
 
 MIT License
+

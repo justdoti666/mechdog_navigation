@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 机械狗寻路系统 - 全局配置 (C++ 版)
  * 基于 Astra Pro 深度相机 + HC-SR04 超声波传感器融合
  */
@@ -150,6 +150,21 @@ struct EmergencyConfig {
     static constexpr double  critical_dist_cm = 10.0; // 临界距离，强制停止
     static constexpr double  warning_dist_cm  = 25.0; // 警告距离，减速
     static constexpr double  safe_dist_cm     = 50.0; // 安全距离，正常行驶
+};
+
+// ============================================================
+// 环境红外强度阈值 (来自 TSL2591, 归一化 0.0~1.0)
+// ============================================================
+// 说明: 以下为软件组预设的保守默认值, 未经过实测标定。
+// 硬件组请按 docs/IR_CALIBRATION.md 标定后修改这两个数字, 代码逻辑无需改动。
+// 判定规则: light <= ir_indoor_max   -> indoor      (Astra 权重高)
+//           light >= ir_outdoor_min  -> outdoor     (超声波主导)
+//           之间                       -> semi_indoor (两者均衡)
+struct IrConfig {
+    static constexpr double ir_indoor_max  = 0.30; // 归一化红外强度上限: 室内
+    static constexpr double ir_outdoor_min = 0.70; // 归一化红外强度下限: 室外/强光
+    static constexpr double ir_sim_min     = 0.05; // 模拟模式红外最小值
+    static constexpr double ir_sim_max     = 0.90; // 模拟模式红外最大值
 };
 
 } // namespace mechdog
