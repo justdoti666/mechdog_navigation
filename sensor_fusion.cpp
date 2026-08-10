@@ -92,7 +92,18 @@ EnvironmentType SensorFusion::determine_environment(const AstraFrame& frame) {
         return EnvironmentType::SEMI_INDOOR;
     }
     // 红外不可用(模拟/无传感器)时回退: 帧有效用深度图估算, 无效视为室外(超声波主导, 安全侧)
-    if (!frame.valid) {
+    if (!frame.valid || frame.environment == EnvironmentType::UNKNOWN) {
+        // 帧未就绪或环境未初始化 (如采集线程启动初帧): 若红外是模拟的,
+        // 用其随机值保证环境可判定 (保持 test_fusion 对"红外模拟值全覆盖三环境"的语义);
+        // 若红外真机失败, 回退室外(安全侧)
+        if (ir_) {
+            double light = ir_->read_normalized_light();
+            if (light >= 0) {
+                if (light <= IrConfig::ir_indoor_max)  return EnvironmentType::INDOOR;
+                if (light >= IrConfig::ir_outdoor_min) return EnvironmentType::OUTDOOR;
+                return EnvironmentType::SEMI_INDOOR;
+            }
+        }
         return EnvironmentType::OUTDOOR;
     }
     return frame.environment;

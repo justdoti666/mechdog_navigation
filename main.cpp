@@ -48,6 +48,10 @@ static HWND g_hwnd = nullptr;
 static FusionResult g_latest_result;
 static bool g_have_result = false;
 
+// 共享最新彩色帧 (真机 RGB 可视化; 由主循环写入, 窗口线程读取)
+static ColorFrameData g_color_frame;
+static bool g_have_color = false;
+
 // 方向 -> 俯视图角度 (度, 0=正前, 顺时针为正; 右=+90, 左=-90)
 static std::map<std::string, double> g_dir_angle = {
     {"front_center", 0.0}, {"front_left", -30.0}, {"front_right", 30.0},
@@ -109,6 +113,53 @@ static void draw_scene(HDC hdc, int w, int h) {
     Font font_big(L"Arial", 16, FontStyleBold);
     SolidBrush white(Color(255, 240, 240, 240));
     SolidBrush dim(Color(220, 160, 160, 160));
+
+    // ===== 彩色模式: 真机 RGB 画面 + DIST/NEAR 叠加 =====
+    if (g_have_color && g_color_frame.valid && !g_color_frame.rgb.empty()) {
+        // 画彩色帧 (拉伸到窗口客户区)
+        Bitmap bmp(g_color_frame.width, g_color_frame.height,
+                   g_color_frame.width * 3, PixelFormat24bppRGB,
+                   const_cast<BYTE*>(g_color_frame.rgb.data()));
+        Rect dst(0, 0, w, h);
+        g.DrawImage(&bmp, dst, 0, 0, g_color_frame.width, g_color_frame.height,
+                    UnitPixel);
+
+        // 左上角叠加: DIST (中央平均距离, 蓝) + NEAR (最近障碍, 青)
+        SolidBrush dist_brush(Color(255, 60, 160, 255));
+        SolidBrush near_brush(Color(255, 60, 255, 230));
+        SolidBrush shadow(Color(160, 0, 0, 0));
+
+        std::wstring dist_txt;
+        if (g_color_frame.center_distance_m > 0) {
+            wchar_t buf[32];
+            swprintf(buf, 32, L"DIST %.2fm", g_color_frame.center_distance_m);
+            dist_txt = buf;
+        } else {
+            dist_txt = L"DIST --";
+        }
+        std::wstring near_txt;
+        if (g_color_frame.nearest_distance_m > 0) {
+            wchar_t buf[32];
+            swprintf(buf, 32, L"NEAR %.2fm", g_color_frame.nearest_distance_m);
+            near_txt = buf;
+        } else {
+            near_txt = L"NEAR --";
+        }
+
+        // 阴影 + 文字 (字号 18/13, 与 rgb_stream 一致)
+        Gdiplus::PointF ds(13, 13), dt(12, 12);
+        Gdiplus::PointF ns(37, 37), nt(36, 36);
+        g.DrawString(dist_txt.c_str(), -1, &font_big, ds, &shadow);
+        g.DrawString(dist_txt.c_str(), -1, &font_big, dt, &dist_brush);
+        Font font_small(L"Arial", 13);
+        g.DrawString(near_txt.c_str(), -1, &font_small, ns, &shadow);
+        g.DrawString(near_txt.c_str(), -1, &font_small, nt, &near_brush);
+
+        // 右上角模式提示
+        Gdiplus::PointF tip((REAL)(w - 160), 10);
+        g.DrawString(L"REAL (RGB)", -1, &font, tip, &dim);
+        return;
+    }
 
     int cx = w / 2;
     int cy = h / 2 + 20;
@@ -314,6 +365,14 @@ int main(int argc, char** argv) {
         // 更新可视化共享数据
         g_latest_result = result;
         g_have_result = true;
+
+        // 真机模式: 读彩色帧用于 RGB 可视化 (模拟模式返回无效, 窗口保持俯视图)
+        if (use_real) {
+            g_color_frame = astra.get_color_frame();
+            g_have_color = g_color_frame.valid;
+        } else {
+            g_have_color = false;
+        }
 #endif
 
         std::cout << "[" << std::fixed << std::setprecision(2)

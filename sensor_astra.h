@@ -2,6 +2,13 @@
  * Astra Pro 深度相机驱动模块 (C++ 版)
  * 基于奥比中光 Astra Pro (单目结构光)
  * 通过 Astra SDK (astra:: API) 获取深度图 (真机模式) / 模拟生成 (模拟模式)
+ *
+ * 真机模式 (USE_ASTRA_SDK):
+ *   使用官方 FrameListener 回调模式 (与 SDK 示例 DepthReaderEventCPP 一致):
+ *   - 首次调用 capture_real 时初始化 StreamSet/Reader + 启动 Depth/Color 双流
+ *   - 独立 update 线程持续 astra_update() 驱动帧回调
+ *   - 回调内填充 latest_frame_ (深度) 与 color_cache_ (彩色 RGB + 距离叠加)
+ *   - 该模式经真机验证: depth+color 双流 640x480 正常出帧
  */
 #pragma once
 
@@ -52,6 +59,16 @@ struct AstraFrame {
     int depth_height = 480;
 };
 
+/** 彩色帧数据 (RGB888, 用于可视化显示) */
+struct ColorFrameData {
+    bool valid = false;
+    int  width  = 640;
+    int  height = 480;
+    std::vector<uint8_t> rgb;   // width*height*3, R G B 连续
+    double center_distance_m = -1.0;   // 中央区域平均距离 (m)
+    double nearest_distance_m = -1.0;  // 中央区域最近障碍 (m)
+};
+
 /** Astra Pro 深度相机驱动 */
 class AstraProDriver {
 public:
@@ -78,12 +95,16 @@ public:
     /** 获取最新帧（线程安全） */
     AstraFrame get_latest_frame() const;
 
+    /** 获取最新彩色帧 (RGB888) + 中央距离/最近障碍, 用于可视化 (真机模式有效) */
+    ColorFrameData get_color_frame();
+
 private:
     bool use_simulated_;
     std::atomic<bool> running_{false};
     mutable std::mutex lock_;
 
     AstraFrame latest_frame_;
+    ColorFrameData color_cache_;
     std::unique_ptr<std::thread> capture_thread_;
     std::mt19937 rng_;
 
@@ -92,6 +113,7 @@ private:
 
     // 真机模式 (Astra SDK, 仅 USE_ASTRA_SDK 编译时启用)
     AstraFrame capture_real();
+    void real_update_loop();
 
     DepthRegion analyze_region(const std::vector<uint16_t>& depth_map,
                                int width, int height, const std::string& region);

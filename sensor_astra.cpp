@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Astra Pro 深度相机驱动模块实现
  */
 #include "sensor_astra.h"
@@ -71,27 +71,108 @@ AstraFrame AstraProDriver::capture_frame() {
 
 #ifdef USE_ASTRA_SDK
 // ========== 真机模式 (Astra SDK) ==========
-AstraFrame AstraProDriver::capture_real() {
-    // 静态初始化 Astra SDK (仅一次; 多实例安全)
-    static bool astra_inited = []() {
+// 使用官方 FrameListener 回调模式 (与 SDK 示例 DepthReaderEventCPP 一致):
+//   首次 capture_real 调用时初始化 + 启动双流, 然后独立线程跑 astra_update() 驱动回调。
+
+namespace {
+
+// 全局共享上下文: StreamSet/Reader + 回调监听
+struct RealAstraContext {
+    bool inited = false;
+    astra::StreamSet streamSet;
+    astra::StreamReader reader;
+    std::thread update_thread;
+    std::atomic<bool> running{false};
+    std::atomic<bool> streams_ready{false};
+
+    // 帧数据 (由回调线程写, 由 capture 线程读; 用各自锁)
+    std::mutex frame_mutex;
+    std::vector<uint16_t> depth_buf;      // 最新深度 (uint16 mm)
+    int depth_w = 0, depth_h = 0;
+    ColorFrameData color;                 // 最新彩色 + 距离
+    bool have_depth = false, have_color = false;
+
+    RealAstraContext() {
         astra::initialize();
-        return true;
-    }();
+        reader = streamSet.create_reader();
+        inited = true;
+    }
+};
 
-    static astra::StreamSet streamSet;
-    static astra::StreamReader reader = streamSet.create_reader();
-    static bool stream_started = false;
+// FrameListener: 帧就绪回调 (SDK 内部线程调用)
+class SampleListener : public astra::FrameListener {
+public:
+    explicit SampleListener(RealAstraContext& ctx) : ctx_(ctx) {}
+    virtual void on_frame_ready(astra::StreamReader& reader, astra::Frame& frame) override {
+        (void)reader;
+        auto depth = frame.get<astra::DepthFrame>();
+        auto color = frame.get<astra::ColorFrame>();
 
-    if (!stream_started) {
-        auto depthStream = reader.stream<astra::DepthStream>();
-        depthStream.start();
-        stream_started = true;
-        std::cout << "[Astra] 真机深度流已启动, serial="
-                  << depthStream.serial_number() << std::endl;
+        std::lock_guard<std::mutex> guard(ctx_.frame_mutex);
+
+        if (depth.is_valid() && depth.width() > 0) {
+            int w = depth.width(), h = depth.height();
+            ctx_.depth_buf.resize(w * h);
+            depth.copy_to(reinterpret_cast<int16_t*>(ctx_.depth_buf.data()));
+            ctx_.depth_w = w;
+            ctx_.depth_h = h;
+            ctx_.have_depth = true;
+        }
+        if (color.is_valid() && color.width() > 0) {
+            int w = color.width(), h = color.height();
+            ctx_.color.rgb.resize(w * h * 3);
+            color.copy_to(reinterpret_cast<astra::RgbPixel*>(ctx_.color.rgb.data()));
+            ctx_.color.width = w;
+            ctx_.color.height = h;
+            ctx_.color.valid = true;
+            ctx_.have_color = true;
+        }
     }
 
-    // 更新 Astra 内部状态, 触发帧回调 (必须每次读取前调用, 否则 open_frame 阻塞/返回空帧)
-    astra_update();
+private:
+    RealAstraContext& ctx_;
+};
+
+RealAstraContext& real_ctx() {
+    static RealAstraContext ctx;
+    return ctx;
+}
+
+// 启动双流 + update 线程 (仅一次)
+void ensure_real_streams(RealAstraContext& ctx) {
+    if (ctx.streams_ready.load()) return;
+
+    SampleListener listener(ctx);
+    ctx.reader.add_listener(listener);
+
+    std::cout << "[Astra] 启动深度流..." << std::endl;
+    auto depthStream = ctx.reader.stream<astra::DepthStream>();
+    depthStream.start();
+    std::cout << "[Astra] 深度流已启动 (serial="
+              << depthStream.serial_number() << ")" << std::endl;
+
+    std::cout << "[Astra] 启动彩色流..." << std::endl;
+    auto colorStream = ctx.reader.stream<astra::ColorStream>();
+    colorStream.start();
+    std::cout << "[Astra] 彩色流已启动" << std::endl;
+
+    ctx.streams_ready = true;
+
+    // 独立线程持续 astra_update() 驱动回调
+    ctx.running = true;
+    ctx.update_thread = std::thread([&ctx]() {
+        while (ctx.running) {
+            astra_update();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    });
+}
+
+} // namespace
+
+AstraFrame AstraProDriver::capture_real() {
+    auto& ctx = real_ctx();
+    ensure_real_streams(ctx);
 
     AstraFrame frame;
     frame.timestamp = std::chrono::duration<double>(
@@ -99,29 +180,26 @@ AstraFrame AstraProDriver::capture_real() {
     frame.depth_width  = DEPTH_WIDTH;
     frame.depth_height = DEPTH_HEIGHT;
 
-    // 读取最新深度帧 (非阻塞轮询: has_new_frame + get_latest_frame(0))
-    // 修复(F2真机): 单次 astra_update() 后新帧未必就绪, 短等待重试;
-    //                get_latest_frame() 默认 ASTRA_TIMEOUT_FOREVER 会阻塞, 必须传 timeout=0
-    auto depthStream = reader.stream<astra::DepthStream>();
-    for (int attempt = 0; attempt < 5 && !reader.has_new_frame(); ++attempt) {
-        astra_update();
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    }
-    if (!reader.has_new_frame()) {
-        frame.valid = false;
-        return frame;
-    }
-    astra::Frame latest = reader.get_latest_frame(0);
-    astra::DepthFrame depthFrame = latest.get<astra::DepthFrame>();
-
-    if (depthFrame.is_valid() && depthFrame.width() > 0) {
-        frame.depth_map.resize(depthFrame.length());
-        depthFrame.copy_to(reinterpret_cast<int16_t*>(frame.depth_map.data()));
+    // 从回调缓存取最新深度帧
+    std::vector<uint16_t> depth;
+    int w = 0, h = 0;
+    {
+        std::lock_guard<std::mutex> guard(ctx.frame_mutex);
+        if (!ctx.have_depth) {
+            frame.valid = false;
+            return frame;
+        }
+        depth = ctx.depth_buf;
+        w = ctx.depth_w;
+        h = ctx.depth_h;
         frame.valid = true;
-    } else {
-        frame.valid = false;
-        return frame;
     }
+    if (w != DEPTH_WIDTH || h != DEPTH_HEIGHT) {
+        // 实际分辨率可能与默认不同, 以实际为准
+        frame.depth_width = w;
+        frame.depth_height = h;
+    }
+    frame.depth_map = std::move(depth);
 
     // 区域分析
     frame.center_region = analyze_region(frame.depth_map, frame.depth_width,
@@ -139,6 +217,40 @@ AstraFrame AstraProDriver::capture_real() {
 
     return frame;
 }
+
+// 获取最新彩色帧 (RGB888) + 中央区域平均距离/最近障碍 (从回调缓存)
+ColorFrameData AstraProDriver::get_color_frame() {
+    ColorFrameData out;
+    if (use_simulated_) {
+        return out;  // 模拟模式无彩色数据
+    }
+    auto& ctx = real_ctx();
+    std::lock_guard<std::mutex> guard(ctx.frame_mutex);
+    if (!ctx.have_color) return out;
+    out = ctx.color;
+
+    // 中央区域平均距离/最近障碍 (从最新深度计算, 与 sensor_fusion 口径一致)
+    if (ctx.have_depth && ctx.depth_w > 0) {
+        double min_mm = -1.0, sum = 0.0;
+        int n = 0;
+        int cx0 = ctx.depth_w / 4, cx1 = ctx.depth_w * 3 / 4;
+        int cy0 = ctx.depth_h / 4, cy1 = ctx.depth_h * 3 / 4;
+        for (int y = cy0; y < cy1; ++y) {
+            for (int x = cx0; x < cx1; ++x) {
+                uint16_t v = ctx.depth_buf[y * ctx.depth_w + x];
+                if (v >= MIN_VALID_DISTANCE_MM && v <= MAX_VALID_DISTANCE_MM) {
+                    sum += v; ++n;
+                    if (min_mm < 0 || v < min_mm) min_mm = v;
+                }
+            }
+        }
+        if (n > 0) {
+            out.center_distance_m = (sum / n) / 1000.0;
+            out.nearest_distance_m = min_mm / 1000.0;
+        }
+    }
+    return out;
+}
 #endif // USE_ASTRA_SDK
 
 AstraFrame AstraProDriver::get_latest_frame() const {
@@ -146,144 +258,112 @@ AstraFrame AstraProDriver::get_latest_frame() const {
     return latest_frame_;
 }
 
-// ========== 模拟深度帧 ==========
+// ========== 模拟模式 ==========
 AstraFrame AstraProDriver::simulate_frame() {
-    int w = DEPTH_WIDTH, h = DEPTH_HEIGHT;
-    std::vector<uint16_t> depth_map(static_cast<size_t>(w * h), 5000);
-
-    int third = w / 3;
-    std::uniform_real_distribution<double> dist_01(0.0, 1.0);
-
-    // 中心偶尔有障碍
-    if (dist_01(rng_) > 0.5) {
-        std::uniform_int_distribution<uint16_t> obstacle(800, 1500);
-        for (int row = 0; row < h; ++row) {
-            auto* base = depth_map.data() + static_cast<size_t>(row * w);
-            for (int col = third; col < 2 * third; ++col) {
-                base[col] = obstacle(rng_);
-            }
-        }
-    }
-
-    // 左侧可能有墙
-    if (dist_01(rng_) > 0.7) {
-        std::uniform_int_distribution<uint16_t> wall(500, 1000);
-        for (int row = 0; row < h; ++row) {
-            auto* base = depth_map.data() + static_cast<size_t>(row * w);
-            for (int col = 0; col < third; ++col) {
-                base[col] = wall(rng_);
-            }
-        }
-    }
-
-    // 添加噪声
-    std::uniform_int_distribution<int16_t> noise(-50, 50);
-    for (auto& v : depth_map) {
-        int val = static_cast<int>(v) + noise(rng_);
-        v = static_cast<uint16_t>(std::clamp(val, 0, 8000));
-    }
-
     AstraFrame frame;
     frame.timestamp = std::chrono::duration<double>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+    frame.depth_width  = DEPTH_WIDTH;
+    frame.depth_height = DEPTH_HEIGHT;
     frame.valid = true;
-    frame.depth_map = std::move(depth_map);
-    frame.depth_width = w;
-    frame.depth_height = h;
+
+    // 生成模拟深度图 (640x480): 前方中央 2.0~5.0m 障碍
+    frame.depth_map.resize(DEPTH_WIDTH * DEPTH_HEIGHT, 0);
+    for (int y = 0; y < DEPTH_HEIGHT; ++y) {
+        for (int x = 0; x < DEPTH_WIDTH; ++x) {
+            double dx = (x - DEPTH_WIDTH / 2.0) / (DEPTH_WIDTH / 2.0);
+            double dy = (y - DEPTH_HEIGHT / 2.0) / (DEPTH_HEIGHT / 2.0);
+            double dist = 2.5 + 2.5 * std::abs(std::sin(dx * 3.0 + dy * 2.0));
+            frame.depth_map[y * DEPTH_WIDTH + x] = static_cast<uint16_t>(dist * 1000.0);
+        }
+    }
+
+    // 环境: 模拟室内
     frame.environment = EnvironmentType::INDOOR;
     frame.ambient_light_level = 0.1;
 
-    frame.center_region = analyze_region(frame.depth_map, w, h, "center");
-    frame.left_region   = analyze_region(frame.depth_map, w, h, "left");
-    frame.right_region  = analyze_region(frame.depth_map, w, h, "right");
+    // 区域分析
+    frame.center_region = analyze_region(frame.depth_map, DEPTH_WIDTH, DEPTH_HEIGHT, "center");
+    frame.left_region   = analyze_region(frame.depth_map, DEPTH_WIDTH, DEPTH_HEIGHT, "left");
+    frame.right_region  = analyze_region(frame.depth_map, DEPTH_WIDTH, DEPTH_HEIGHT, "right");
 
     return frame;
 }
 
-// ========== 区域分析 ==========
-DepthRegion AstraProDriver::analyze_region(
-    const std::vector<uint16_t>& depth_map,
-    int width, int height, const std::string& region) {
+// ========== 深度区域分析 ==========
+DepthRegion AstraProDriver::analyze_region(const std::vector<uint16_t>& depth_map,
+                                           int width, int height,
+                                           const std::string& region) {
+    DepthRegion reg;
+    if (depth_map.empty() || width <= 0 || height <= 0) return reg;
 
-    int third_w = width / 3;
-    int col_start, col_end;
-
-    if (region == "left") {
-        col_start = 0;          col_end = third_w;
+    int x0, x1, y0, y1;
+    if (region == "center") {
+        x0 = width / 4; x1 = width * 3 / 4;
+        y0 = height / 4; y1 = height * 3 / 4;
+    } else if (region == "left") {
+        x0 = 0; x1 = width / 4;
+        y0 = height / 4; y1 = height * 3 / 4;
     } else if (region == "right") {
-        col_start = 2 * third_w; col_end = width;
-    } else { // center
-        col_start = third_w;     col_end = 2 * third_w;
+        x0 = width * 3 / 4; x1 = width;
+        y0 = height / 4; y1 = height * 3 / 4;
+    } else {
+        x0 = 0; x1 = width; y0 = 0; y1 = height;
     }
 
-    std::vector<double> valid_pixels;
-    int obstacle_count = 0;
-    int total_roi = height * (col_end - col_start);
+    std::vector<double> valid;
+    double sum = 0.0;
+    int valid_count = 0;
+    double min_v = MAX_VALID_DISTANCE_MM, max_v = 0.0;
+    int total = (x1 - x0) * (y1 - y0);
 
-    for (int row = 0; row < height; ++row) {
-        auto* base = depth_map.data() + static_cast<size_t>(row * width);
-        for (int col = col_start; col < col_end; ++col) {
-            uint16_t val = base[col];
-            if (val >= MIN_VALID_DISTANCE_MM && val <= MAX_VALID_DISTANCE_MM) {
-                valid_pixels.push_back(static_cast<double>(val));
-                if (val < 1000) {
-                    ++obstacle_count;
-                }
+    for (int y = y0; y < y1; ++y) {
+        for (int x = x0; x < x1; ++x) {
+            uint16_t v = depth_map[y * width + x];
+            if (v >= MIN_VALID_DISTANCE_MM && v <= MAX_VALID_DISTANCE_MM) {
+                valid.push_back(v);
+                sum += v;
+                ++valid_count;
+                if (v < min_v) min_v = v;
+                if (v > max_v) max_v = v;
             }
         }
     }
 
-    DepthRegion dr;
-    if (valid_pixels.empty()) {
-        return dr; // 全部默认 8.0m
-    }
+    reg.valid_pixel_ratio = total > 0 ? (double)valid_count / total : 0.0;
+    reg.center_distance_m = valid_count > 0 ? (sum / valid_count) / 1000.0 : 0.0;
+    reg.min_distance_m    = valid_count > 0 ? min_v / 1000.0 : MAX_VALID_DISTANCE_MM / 1000.0;
+    reg.max_distance_m    = valid_count > 0 ? max_v / 1000.0 : 0.0;
+    reg.obstacle_count    = valid_count;
+    reg.quality_score     = calc_quality(valid);
 
-    auto mid = valid_pixels.begin() + valid_pixels.size() / 2;
-    std::nth_element(valid_pixels.begin(), mid, valid_pixels.end());
-    double median = *mid;
-
-    auto [min_it, max_it] = std::minmax_element(valid_pixels.begin(), valid_pixels.end());
-
-    dr.center_distance_m  = std::round(median / 1000.0 * 1000.0) / 1000.0;
-    dr.min_distance_m     = std::round(*min_it / 1000.0 * 1000.0) / 1000.0;
-    dr.max_distance_m     = std::round(*max_it / 1000.0 * 1000.0) / 1000.0;
-    dr.obstacle_count     = obstacle_count;
-    dr.valid_pixel_ratio  = std::round(static_cast<double>(valid_pixels.size()) / total_roi * 1000.0) / 1000.0;
-    dr.quality_score      = calc_quality(valid_pixels);
-
-    return dr;
+    return reg;
 }
 
 double AstraProDriver::calc_quality(const std::vector<double>& valid_values) {
-    if (valid_values.size() <= 1) return 0.0;
-    double sum = 0.0, sq_sum = 0.0;
-    for (auto v : valid_values) {
-        sum += v;
-        sq_sum += v * v;
-    }
-    double mean = sum / valid_values.size();
-    double variance = sq_sum / valid_values.size() - mean * mean;
-    double noise = std::min(std::sqrt(variance) / 1000.0, 1.0);
-    return std::max(0.0, 1.0 - noise * 0.7);
+    if (valid_values.empty()) return 0.0;
+    // 质量 = 有效像素比例 (相对满帧)
+    return std::min(1.0, (double)valid_values.size() / (DEPTH_WIDTH * DEPTH_HEIGHT * 0.5));
 }
 
-double AstraProDriver::estimate_ambient_light(
-    const std::vector<uint16_t>& depth_map, int width, int height) {
-    size_t total = static_cast<size_t>(width * height);
-    size_t valid_count = 0;
-    for (auto v : depth_map) {
-        if (v >= MIN_VALID_DISTANCE_MM && v <= MAX_VALID_DISTANCE_MM) {
-            ++valid_count;
+double AstraProDriver::estimate_ambient_light(const std::vector<uint16_t>& depth_map,
+                                              int width, int height) {
+    if (depth_map.empty() || width <= 0 || height <= 0) return 0.0;
+    int valid = 0;
+    for (size_t i = 0; i < depth_map.size(); ++i) {
+        if (depth_map[i] >= MIN_VALID_DISTANCE_MM && depth_map[i] <= MAX_VALID_DISTANCE_MM) {
+            ++valid;
         }
     }
-    double invalid_ratio = 1.0 - static_cast<double>(valid_count) / total;
-    return std::round(invalid_ratio * 1000.0) / 1000.0;
+    double ratio = (double)valid / depth_map.size();
+    // 无效像素多 -> 光线强(室外) 或 太近; 有效像素多 -> 室内
+    return std::min(1.0, std::max(0.0, 1.0 - ratio));
 }
 
 EnvironmentType AstraProDriver::classify_environment(double light_level) {
-    if (light_level < 0.15)      return EnvironmentType::INDOOR;
-    else if (light_level < 0.4)  return EnvironmentType::SEMI_INDOOR;
-    else                         return EnvironmentType::OUTDOOR;
+    if (light_level < 0.3) return EnvironmentType::INDOOR;
+    if (light_level < 0.7) return EnvironmentType::SEMI_INDOOR;
+    return EnvironmentType::OUTDOOR;
 }
 
 } // namespace mechdog
