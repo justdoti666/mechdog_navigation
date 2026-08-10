@@ -22,6 +22,7 @@
 #include <csignal>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <thread>
 #include <map>
 
@@ -51,6 +52,9 @@ static bool g_have_result = false;
 // 共享最新彩色帧 (真机 RGB 可视化; 由主循环写入, 窗口线程读取)
 static ColorFrameData g_color_frame;
 static bool g_have_color = false;
+
+// 可视化共享数据互斥锁 (主循环写 / 窗口线程读, 防数据竞争崩溃)
+static std::mutex g_viz_mutex;
 
 // 方向 -> 俯视图角度 (度, 0=正前, 顺时针为正; 右=+90, 左=-90)
 static std::map<std::string, double> g_dir_angle = {
@@ -115,13 +119,22 @@ static void draw_scene(HDC hdc, int w, int h) {
     SolidBrush dim(Color(220, 160, 160, 160));
 
     // ===== 彩色模式: 真机 RGB 画面 + DIST/NEAR 叠加 =====
-    if (g_have_color && g_color_frame.valid && !g_color_frame.rgb.empty()) {
+    {
+        // 加锁拷贝共享彩色帧到局部 (窗口线程读, 主循环写, 防竞态)
+        ColorFrameData local_color;
+        bool have_color = false;
+        {
+            std::lock_guard<std::mutex> lock(g_viz_mutex);
+            local_color = g_color_frame;
+            have_color = g_have_color;
+        }
+        if (have_color && local_color.valid && !local_color.rgb.empty()) {
         // 画彩色帧 (拉伸到窗口客户区)
-        Bitmap bmp(g_color_frame.width, g_color_frame.height,
-                   g_color_frame.width * 3, PixelFormat24bppRGB,
-                   const_cast<BYTE*>(g_color_frame.rgb.data()));
+        Bitmap bmp(local_color.width, local_color.height,
+                   local_color.width * 3, PixelFormat24bppRGB,
+                   const_cast<BYTE*>(local_color.rgb.data()));
         Rect dst(0, 0, w, h);
-        g.DrawImage(&bmp, dst, 0, 0, g_color_frame.width, g_color_frame.height,
+        g.DrawImage(&bmp, dst, 0, 0, local_color.width, local_color.height,
                     UnitPixel);
 
         // 左上角叠加: DIST (中央平均距离, 蓝) + NEAR (最近障碍, 青)
@@ -130,17 +143,17 @@ static void draw_scene(HDC hdc, int w, int h) {
         SolidBrush shadow(Color(160, 0, 0, 0));
 
         std::wstring dist_txt;
-        if (g_color_frame.center_distance_m > 0) {
+        if (local_color.center_distance_m > 0) {
             wchar_t buf[32];
-            swprintf(buf, 32, L"DIST %.2fm", g_color_frame.center_distance_m);
+            swprintf(buf, 32, L"DIST %.2fm", local_color.center_distance_m);
             dist_txt = buf;
         } else {
             dist_txt = L"DIST --";
         }
         std::wstring near_txt;
-        if (g_color_frame.nearest_distance_m > 0) {
+        if (local_color.nearest_distance_m > 0) {
             wchar_t buf[32];
-            swprintf(buf, 32, L"NEAR %.2fm", g_color_frame.nearest_distance_m);
+            swprintf(buf, 32, L"NEAR %.2fm", local_color.nearest_distance_m);
             near_txt = buf;
         } else {
             near_txt = L"NEAR --";
@@ -159,6 +172,7 @@ static void draw_scene(HDC hdc, int w, int h) {
         Gdiplus::PointF tip((REAL)(w - 160), 10);
         g.DrawString(L"REAL (RGB)", -1, &font, tip, &dim);
         return;
+        }
     }
 
     int cx = w / 2;
@@ -318,16 +332,16 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
     // Windows 控制台默认 GBK(936), 而源码/输出是 UTF-8 -> 中文乱码
     SetConsoleOutputCP(CP_UTF8);
-    // 启动可视化窗口线程
-    CreateThread(nullptr, 0, window_thread, nullptr, 0, nullptr);
 #endif
     std::signal(SIGINT, on_signal);
 
     // 命令行参数: --real 使用真机 (Astra SDK + 真实红外), 默认模拟模式
     bool use_real = false;
+    bool no_viz = false;
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
         if (arg == "--real" || arg == "-r") use_real = true;
+        if (arg == "--noviz") no_viz = true;
     }
 
 #ifdef USE_ASTRA_SDK
@@ -348,6 +362,18 @@ int main(int argc, char** argv) {
 
     PathPlanner planner;
 
+#ifdef _WIN32
+    // 真机模式: 先在 main 线程预初始化 Astra SDK (深度+彩色双流 start),
+    // 再启动窗口线程, 避免采集线程/窗口线程同时初始化相机导致 start 阻塞
+    if (use_real) {
+        astra.init_hardware();
+    }
+    // 启动可视化窗口线程 (--noviz 可禁用, 用于定位崩溃)
+    if (!no_viz) {
+        CreateThread(nullptr, 0, window_thread, nullptr, 0, nullptr);
+    }
+#endif
+
     astra.start();
 
     std::cout << "=== mechdog_navigation "
@@ -367,11 +393,14 @@ int main(int argc, char** argv) {
         g_have_result = true;
 
         // 真机模式: 读彩色帧用于 RGB 可视化 (模拟模式返回无效, 窗口保持俯视图)
-        if (use_real) {
-            g_color_frame = astra.get_color_frame();
-            g_have_color = g_color_frame.valid;
-        } else {
-            g_have_color = false;
+        {
+            std::lock_guard<std::mutex> lock(g_viz_mutex);
+            if (use_real) {
+                g_color_frame = astra.get_color_frame();
+                g_have_color = g_color_frame.valid;
+            } else {
+                g_have_color = false;
+            }
         }
 #endif
 

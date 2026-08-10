@@ -86,6 +86,9 @@ public:
     /** 启动连续采集线程 */
     void start();
 
+    /** 预初始化硬件 (真机模式: 在 main 线程启动 Astra SDK + 双流, 避免采集线程里 start 阻塞) */
+    void init_hardware();
+
     /** 停止采集 */
     void stop();
 

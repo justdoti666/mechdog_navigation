@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <memory>
 #include <thread>
 #include <chrono>
 
@@ -26,6 +27,9 @@ AstraProDriver::~AstraProDriver() {
     stop();
 }
 
+// 预初始化: 在 main 线程调用 ensure_real_streams (深度+彩色双流 start)
+// 避免在 capture_loop 线程里首次 start 时与窗口线程竞争导致阻塞
+// (实现在文件末尾 USE_ASTRA_SDK 块内, real_ctx/ensure_real_streams 已定义)
 void AstraProDriver::start() {
     if (running_) return;
     running_ = true;
@@ -76,7 +80,13 @@ AstraFrame AstraProDriver::capture_frame() {
 
 namespace {
 
+// 前向声明 (init_hardware 在匿名命名空间定义前使用)
+struct RealAstraContext;
+RealAstraContext& real_ctx();
+void ensure_real_streams(RealAstraContext& ctx);
+
 // 全局共享上下文: StreamSet/Reader + 回调监听
+class SampleListener;  // 前向声明 (成员指针)
 struct RealAstraContext {
     bool inited = false;
     astra::StreamSet streamSet;
@@ -91,6 +101,9 @@ struct RealAstraContext {
     int depth_w = 0, depth_h = 0;
     ColorFrameData color;                 // 最新彩色 + 距离
     bool have_depth = false, have_color = false;
+
+    // FrameListener 长期存活 (SDK 持有其指针, 局部变量析构会导致悬垂崩溃)
+    std::unique_ptr<SampleListener> listener;
 
     RealAstraContext() {
         astra::initialize();
@@ -142,8 +155,9 @@ RealAstraContext& real_ctx() {
 void ensure_real_streams(RealAstraContext& ctx) {
     if (ctx.streams_ready.load()) return;
 
-    SampleListener listener(ctx);
-    ctx.reader.add_listener(listener);
+    // listener 必须长期存活 (SDK 持有指针, 局部对象会悬垂崩溃)
+    ctx.listener = std::make_unique<SampleListener>(ctx);
+    ctx.reader.add_listener(*ctx.listener);
 
     std::cout << "[Astra] 启动深度流..." << std::endl;
     auto depthStream = ctx.reader.stream<astra::DepthStream>();
@@ -250,6 +264,15 @@ ColorFrameData AstraProDriver::get_color_frame() {
         }
     }
     return out;
+}
+
+// 预初始化硬件: 在 main 线程调用 (窗口线程/采集线程启动前)
+// 确保深度+彩色双流在 main 线程 start, 避免采集线程里首次 start 阻塞
+void AstraProDriver::init_hardware() {
+    if (use_simulated_) return;
+    auto& ctx = real_ctx();
+    ensure_real_streams(ctx);
+    std::cout << "[Astra] 硬件预初始化完成" << std::endl;
 }
 #endif // USE_ASTRA_SDK
 
