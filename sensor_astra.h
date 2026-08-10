@@ -101,6 +101,9 @@ public:
     /** 获取最新彩色帧 (RGB888) + 中央距离/最近障碍, 用于可视化 (真机模式有效) */
     ColorFrameData get_color_frame();
 
+    /** 是否真机模式 (非模拟) */
+    bool is_real() const { return !use_simulated_; }
+
 private:
     bool use_simulated_;
     std::atomic<bool> running_{false};

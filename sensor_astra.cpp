@@ -130,6 +130,24 @@ public:
             ctx_.depth_w = w;
             ctx_.depth_h = h;
             ctx_.have_depth = true;
+
+            // 中央区域平均距离/最近障碍 (每帧回调算一次, 避免 get_color_frame 重复遍历)
+            double min_mm = -1.0, sum = 0.0;
+            int n = 0;
+            int cx0 = w / 4, cx1 = w * 3 / 4;
+            int cy0 = h / 4, cy1 = h * 3 / 4;
+            for (int y = cy0; y < cy1; ++y) {
+                for (int x = cx0; x < cx1; ++x) {
+                    uint16_t v = ctx_.depth_buf[y * w + x];
+                    if (v >= AstraProDriver::MIN_VALID_DISTANCE_MM &&
+                        v <= AstraProDriver::MAX_VALID_DISTANCE_MM) {
+                        sum += v; ++n;
+                        if (min_mm < 0 || v < min_mm) min_mm = v;
+                    }
+                }
+            }
+            ctx_.color.center_distance_m = (n > 0) ? (sum / n) / 1000.0 : -1.0;
+            ctx_.color.nearest_distance_m = (min_mm > 0) ? min_mm / 1000.0 : -1.0;
         }
         if (color.is_valid() && color.width() > 0) {
             int w = color.width(), h = color.height();
@@ -241,28 +259,8 @@ ColorFrameData AstraProDriver::get_color_frame() {
     auto& ctx = real_ctx();
     std::lock_guard<std::mutex> guard(ctx.frame_mutex);
     if (!ctx.have_color) return out;
+    // 距离已在回调线程算好 (center_distance_m/nearest_distance_m), 直接浅拷贝返回
     out = ctx.color;
-
-    // 中央区域平均距离/最近障碍 (从最新深度计算, 与 sensor_fusion 口径一致)
-    if (ctx.have_depth && ctx.depth_w > 0) {
-        double min_mm = -1.0, sum = 0.0;
-        int n = 0;
-        int cx0 = ctx.depth_w / 4, cx1 = ctx.depth_w * 3 / 4;
-        int cy0 = ctx.depth_h / 4, cy1 = ctx.depth_h * 3 / 4;
-        for (int y = cy0; y < cy1; ++y) {
-            for (int x = cx0; x < cx1; ++x) {
-                uint16_t v = ctx.depth_buf[y * ctx.depth_w + x];
-                if (v >= MIN_VALID_DISTANCE_MM && v <= MAX_VALID_DISTANCE_MM) {
-                    sum += v; ++n;
-                    if (min_mm < 0 || v < min_mm) min_mm = v;
-                }
-            }
-        }
-        if (n > 0) {
-            out.center_distance_m = (sum / n) / 1000.0;
-            out.nearest_distance_m = min_mm / 1000.0;
-        }
-    }
     return out;
 }
 

@@ -56,6 +56,9 @@ static bool g_have_color = false;
 // 可视化共享数据互斥锁 (主循环写 / 窗口线程读, 防数据竞争崩溃)
 static std::mutex g_viz_mutex;
 
+// 窗口线程独立刷新用: 指向 astra 驱动 (真机模式下窗口线程直接读彩色帧, 画面不依赖主循环频率)
+static AstraProDriver* g_astra_ptr = nullptr;
+
 // 方向 -> 俯视图角度 (度, 0=正前, 顺时针为正; 右=+90, 左=-90)
 static std::map<std::string, double> g_dir_angle = {
     {"front_center", 0.0}, {"front_left", -30.0}, {"front_right", 30.0},
@@ -106,10 +109,12 @@ static std::wstring widen(const char* s) {
     return out;
 }
 
-// 窗口绘制
+// 窗口绘制 (双缓冲: 先在内存 Bitmap 画完整帧, 再一次性上屏, 消除闪烁)
 static void draw_scene(HDC hdc, int w, int h) {
     using namespace Gdiplus;
-    Graphics g(hdc);
+    // 内存缓冲 (防止逐笔绘制导致闪烁)
+    Bitmap mem_bmp(w, h, PixelFormat32bppARGB);
+    Graphics g(&mem_bmp);
     g.SetSmoothingMode(SmoothingModeAntiAlias);
     g.Clear(Color(30, 30, 38));
 
@@ -171,6 +176,10 @@ static void draw_scene(HDC hdc, int w, int h) {
         // 右上角模式提示
         Gdiplus::PointF tip((REAL)(w - 160), 10);
         g.DrawString(L"REAL (RGB)", -1, &font, tip, &dim);
+
+        // 一次性上屏 (双缓冲)
+        Graphics screen(hdc);
+        screen.DrawImage(&mem_bmp, 0, 0, w, h);
         return;
         }
     }
@@ -257,6 +266,10 @@ static void draw_scene(HDC hdc, int w, int h) {
     // 右上角说明
     Gdiplus::PointF tip((REAL)(w - 220), 10);
     g.DrawString(L"\u5f00\u53d1\u89c6\u89d2: \u6a21\u62df\u6a21\u5f0f", -1, &font, tip, &dim);
+
+    // 一次性上屏 (双缓冲)
+    Graphics screen(hdc);
+    screen.DrawImage(&mem_bmp, 0, 0, w, h);
 }
 
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -311,13 +324,20 @@ static DWORD WINAPI window_thread(LPVOID) {
         return 1;
     }
     ShowWindow(g_hwnd, SW_SHOW);
-    SetTimer(g_hwnd, 1, 200, nullptr);   // 200ms 刷新
+    SetTimer(g_hwnd, 1, 100, nullptr);   // 100ms 刷新 (10Hz, 流畅)
 
     MSG msg;
     while (g_window_open && GetMessage(&msg, nullptr, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
         if (msg.message == WM_TIMER) {
+            // 窗口线程独立刷新彩色帧 (画面流畅, 不依赖主循环 4-5Hz)
+            if (g_astra_ptr && g_astra_ptr->is_real()) {
+                auto cf = g_astra_ptr->get_color_frame();
+                std::lock_guard<std::mutex> lock(g_viz_mutex);
+                g_color_frame = cf;
+                g_have_color = cf.valid;
+            }
             InvalidateRect(g_hwnd, nullptr, FALSE);
         }
     }
@@ -368,6 +388,8 @@ int main(int argc, char** argv) {
     if (use_real) {
         astra.init_hardware();
     }
+    // 窗口线程独立刷新彩色帧用
+    g_astra_ptr = &astra;
     // 启动可视化窗口线程 (--noviz 可禁用, 用于定位崩溃)
     if (!no_viz) {
         CreateThread(nullptr, 0, window_thread, nullptr, 0, nullptr);
@@ -388,19 +410,12 @@ int main(int argc, char** argv) {
         auto cmd = planner.plan(result);
 
 #ifdef _WIN32
-        // 更新可视化共享数据
-        g_latest_result = result;
-        g_have_result = true;
-
-        // 真机模式: 读彩色帧用于 RGB 可视化 (模拟模式返回无效, 窗口保持俯视图)
+        // 更新可视化共享数据 (彩色帧由窗口线程独立刷新, 这里只更新融合结果)
         {
             std::lock_guard<std::mutex> lock(g_viz_mutex);
-            if (use_real) {
-                g_color_frame = astra.get_color_frame();
-                g_have_color = g_color_frame.valid;
-            } else {
-                g_have_color = false;
-            }
+            g_latest_result = result;
+            g_have_result = true;
+            if (!use_real) g_have_color = false;
         }
 #endif
 
@@ -426,7 +441,7 @@ int main(int argc, char** argv) {
         std::cout << std::endl;
 
         ++tick;
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     astra.stop();
