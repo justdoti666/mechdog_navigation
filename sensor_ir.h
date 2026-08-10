@@ -47,6 +47,9 @@ public:
     /** 读取归一化环境红外强度: 0.0(暗) ~ 1.0(强红外); 返回 -1.0 表示读取失败 */
     double read_normalized_light();
 
+    /** 是否处于模拟模式 (真机时环境判定应跳过红外, 避免模拟随机值污染) */
+    bool is_simulated() const { return use_simulated_; }
+
 private:
     bool use_simulated_;
 

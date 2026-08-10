@@ -81,7 +81,7 @@ FusionResult SensorFusion::fuse() {
 // ========== 环境判断 ==========
 EnvironmentType SensorFusion::determine_environment(const AstraFrame& frame) {
     // 修复(F3): 环境判定改用 TSL2591 实测红外强度(设计意图), 而非深度图无效像素比估算
-    if (ir_) {
+    if (ir_ && !ir_->is_simulated()) {
         double light = ir_->read_normalized_light();  // 0.0~1.0; -1.0 = 读取失败
         if (light < 0) {
             // 修复D3: 红外传感器故障时回退室外(超声波主导), 安全侧
@@ -91,7 +91,7 @@ EnvironmentType SensorFusion::determine_environment(const AstraFrame& frame) {
         if (light >= IrConfig::ir_outdoor_min) return EnvironmentType::OUTDOOR;
         return EnvironmentType::SEMI_INDOOR;
     }
-    // 无红外传感器时回退: 帧无效视为室外(超声波主导, 安全侧)
+    // 红外不可用(模拟/无传感器)时回退: 帧有效用深度图估算, 无效视为室外(超声波主导, 安全侧)
     if (!frame.valid) {
         return EnvironmentType::OUTDOOR;
     }

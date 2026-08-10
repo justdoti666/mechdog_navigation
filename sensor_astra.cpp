@@ -90,7 +90,7 @@ AstraFrame AstraProDriver::capture_real() {
                   << depthStream.serial_number() << std::endl;
     }
 
-    // 更新 Astra 内部状态, 触发帧回调
+    // 更新 Astra 内部状态, 触发帧回调 (必须每次读取前调用, 否则 open_frame 阻塞/返回空帧)
     astra_update();
 
     AstraFrame frame;
@@ -99,9 +99,19 @@ AstraFrame AstraProDriver::capture_real() {
     frame.depth_width  = DEPTH_WIDTH;
     frame.depth_height = DEPTH_HEIGHT;
 
-    // 读取最新深度帧 (StreamReader::get_latest_frame 轮询模式, 无需 FrameListener)
+    // 读取最新深度帧 (非阻塞轮询: has_new_frame + get_latest_frame(0))
+    // 修复(F2真机): 单次 astra_update() 后新帧未必就绪, 短等待重试;
+    //                get_latest_frame() 默认 ASTRA_TIMEOUT_FOREVER 会阻塞, 必须传 timeout=0
     auto depthStream = reader.stream<astra::DepthStream>();
-    astra::Frame latest = reader.get_latest_frame();
+    for (int attempt = 0; attempt < 5 && !reader.has_new_frame(); ++attempt) {
+        astra_update();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    if (!reader.has_new_frame()) {
+        frame.valid = false;
+        return frame;
+    }
+    astra::Frame latest = reader.get_latest_frame(0);
     astra::DepthFrame depthFrame = latest.get<astra::DepthFrame>();
 
     if (depthFrame.is_valid() && depthFrame.width() > 0) {
