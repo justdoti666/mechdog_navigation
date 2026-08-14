@@ -52,15 +52,7 @@ FusionResult SensorFusion::fuse() {
     // 5. 底部悬崖检测（仅超声波）
     const auto& bottom = ultrasonic_data.bottom;
     result.cliff_detected = ultrasonic_data.get_cliff_detected();
-    FusedObstacle bottom_obs;
-    bottom_obs.direction = "bottom";
-    bottom_obs.distance_m = bottom.distance_cm * kCmToM;
-    bottom_obs.confidence = bottom.valid ? 1.0 : 0.0;
-    bottom_obs.ultrasonic_dist_cm = bottom.distance_cm;
-    bottom_obs.astra_dist_m = 8.0;
-    bottom_obs.source = "仅超声波（底部）";
-    bottom_obs.level = result.cliff_detected ? ObstacleLevel::CRITICAL : ObstacleLevel::SAFE;
-    result.obstacles["bottom"] = std::move(bottom_obs);
+    result.obstacles["bottom"] = build_bottom_obstacle(bottom, result.cliff_detected);
 
     // 6. 计算综合决策
     result.min_forward_distance_m = std::min({
@@ -169,8 +161,7 @@ FusedObstacle SensorFusion::fuse_direction(
         ultra_dist_m, astra_dist_m, astra_valid, astra_w, ultra_w);
 
     // 计算置信度
-    double confidence = calc_confidence(
-        ultra_dist_m, astra_dist_m, astra_valid, astra_w, ultra_w);
+    double confidence = calc_confidence(ultra_dist_m, astra_dist_m, astra_valid);
 
     // 判断障碍物等级
     auto level = classify_obstacle_level(fused_dist);
@@ -258,10 +249,25 @@ std::pair<double, std::string> SensorFusion::layer_fusion(
     return {astra_m, oss.str()};
 }
 
+// ========== 底部障碍物构造 (R5-1: 无效读数兜底 0.0, 不产出负距离) ==========
+FusedObstacle SensorFusion::build_bottom_obstacle(
+    const UltrasonicReading& bottom, bool cliff_detected) {
+    FusedObstacle obs;
+    obs.direction = "bottom";
+    // R5-1: 真机超时返回 -1.0cm (valid=false), 直接乘 kCmToM 会得到 -0.01m
+    // 写进融合结果; 无效时兜底 0.0 (不参与 min_forward, 可视化 d<=0 跳过)
+    obs.distance_m = bottom.valid ? bottom.distance_cm * kCmToM : 0.0;
+    obs.confidence = bottom.valid ? 1.0 : 0.0;
+    obs.ultrasonic_dist_cm = bottom.distance_cm;
+    obs.astra_dist_m = 8.0;
+    obs.source = "仅超声波（底部）";
+    obs.level = cliff_detected ? ObstacleLevel::CRITICAL : ObstacleLevel::SAFE;
+    return obs;
+}
+
 // ========== 置信度计算 ==========
 double SensorFusion::calc_confidence(
-    double ultra_m, double astra_m, bool astra_valid,
-    double astra_w, double ultra_w) {
+    double ultra_m, double astra_m, bool astra_valid) {
     // 修复D2: 超声有效区间统一为 [0.02m, 4.5m)
     const bool ultra_valid = (ultra_m >= 0.02) && (ultra_m < 4.5);
 

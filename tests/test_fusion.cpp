@@ -106,12 +106,46 @@ public:
     static ObstacleLevel classify_obstacle_level(SensorFusion& f, double dist_m) {
         return f.classify_obstacle_level(dist_m);
     }
+    static FusedObstacle build_bottom_obstacle(SensorFusion& f,
+                                               const UltrasonicReading& bottom,
+                                               bool cliff_detected) {
+        return f.build_bottom_obstacle(bottom, cliff_detected);
+    }
     static double calc_confidence(SensorFusion& f, double ultra_m, double astra_m,
-                                  bool astra_valid, double astra_w, double ultra_w) {
-        return f.calc_confidence(ultra_m, astra_m, astra_valid, astra_w, ultra_w);
+                                  bool astra_valid) {
+        return f.calc_confidence(ultra_m, astra_m, astra_valid);
     }
 };
 } // namespace mechdog
+
+static void test_bottom_invalid_no_negative_distance() {
+    // R5-1/R5-2: bottom 无效读数(-1.0cm, valid=false) 不得产生负距离
+    // 原实现直接乘 kCmToM 得到 -0.01m 写入融合结果
+    AstraProDriver astra(true);
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    InfraRedSensor ir(true);
+    SensorFusion fusion(&astra, &ultrasonic, &ir);
+
+    UltrasonicReading invalid;
+    invalid.sensor_name = "bottom";
+    invalid.distance_cm = -1.0;  // 真机超时
+    invalid.valid = false;
+
+    auto obs = SensorFusionTestAccess::build_bottom_obstacle(fusion, invalid, /*cliff=*/true);
+    CHECK(obs.distance_m >= 0.0);           // 无效 -> 兜底 0.0, 不得为负
+    CHECK(obs.distance_m == 0.0);
+    CHECK(obs.confidence == 0.0);           // 无效 -> 0 置信度
+    CHECK(obs.level == ObstacleLevel::CRITICAL);  // 悬崖判定仍生效 (get_cliff_detected 语义)
+
+    // 对照: 有效读数正常换算
+    UltrasonicReading valid_r;
+    valid_r.sensor_name = "bottom";
+    valid_r.distance_cm = 15.0;
+    valid_r.valid = true;
+    auto obs2 = SensorFusionTestAccess::build_bottom_obstacle(fusion, valid_r, /*cliff=*/false);
+    CHECK(std::abs(obs2.distance_m - 0.15) < 1e-9);
+    CHECK(obs2.confidence == 1.0);
+}
 
 static void test_confidence_ultra_invalid_keeps_astra() {
     // R-1: 超声无效(兜底 4.5)不得参与一致性计算——兜底值不是真实距离,
@@ -123,12 +157,12 @@ static void test_confidence_ultra_invalid_keeps_astra() {
 
     // 超声无效 + Astra 8m: 修复后 = 仅 Astra 单独可信度 0.8
     double conf_invalid = SensorFusionTestAccess::calc_confidence(
-        fusion, /*ultra_m=*/4.5, /*astra_m=*/8.0, /*astra_valid=*/true, 0.1, 0.9);
+        fusion, /*ultra_m=*/4.5, /*astra_m=*/8.0, /*astra_valid=*/true);
     CHECK(std::abs(conf_invalid - 0.8) < 1e-6);
 
     // 对照: 超声有效且与 Astra 接近 (2.0 vs 2.5): consistency = 1-0.5/2 = 0.75
     double conf_valid = SensorFusionTestAccess::calc_confidence(
-        fusion, /*ultra_m=*/2.0, /*astra_m=*/2.5, /*astra_valid=*/true, 0.5, 0.5);
+        fusion, /*ultra_m=*/2.0, /*astra_m=*/2.5, /*astra_valid=*/true);
     CHECK(std::abs(conf_valid - 0.95 * 0.75) < 1e-6);
 }
 
@@ -174,6 +208,7 @@ int main() {
     test_cliff_valid_check();
     test_min_forward_valid_filter();
     test_layer_fusion_boundaries();
+    test_bottom_invalid_no_negative_distance();
     test_confidence_ultra_invalid_keeps_astra();
     test_invalid_ultrasonic_no_false_critical();
 

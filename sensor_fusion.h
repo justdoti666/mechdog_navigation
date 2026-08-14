@@ -104,8 +104,10 @@ private:
         double ultra_m, double astra_m, bool astra_valid,
         double astra_w, double ultra_w);
 
-    double calc_confidence(double ultra_m, double astra_m,
-                           bool astra_valid, double astra_w, double ultra_w);
+    FusedObstacle build_bottom_obstacle(const UltrasonicReading& bottom,
+                                        bool cliff_detected);
+
+    double calc_confidence(double ultra_m, double astra_m, bool astra_valid);
 
     ObstacleLevel classify_obstacle_level(double distance_m);
     NavigationAction determine_action(double min_forward_m,
