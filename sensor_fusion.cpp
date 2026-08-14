@@ -220,14 +220,20 @@ std::pair<double, std::string> SensorFusion::layer_fusion(
         }
     }
 
-    // L1 区间 (0.6-3m)：保守取最小值
+    // L1 区间 (0.6-3m)：保守取最小值 (FIX-11: 超声无效时不再误标"融合")
     if (astra_m < 3.0) {
-        double conservative = std::min(ultra_m, astra_m);
-        std::ostringstream oss;
-        oss << "融合(L1): 取保守值 min(超声" << static_cast<int>(ultra_m * 100)
-            << "cm, Astra" << static_cast<int>(astra_m * 100) << "cm) = "
-            << static_cast<int>(conservative * 100) << "cm";
-        return {conservative, oss.str()};
+        if (ultra_valid) {
+            double conservative = std::min(ultra_m, astra_m);
+            std::ostringstream oss;
+            oss << "融合(L1): 取保守值 min(超声" << static_cast<int>(ultra_m * 100)
+                << "cm, Astra" << static_cast<int>(astra_m * 100) << "cm) = "
+                << static_cast<int>(conservative * 100) << "cm";
+            return {conservative, oss.str()};
+        } else {
+            std::ostringstream oss;
+            oss << "仅Astra (L1,超声超量程,Astra=" << astra_m << "m)";
+            return {astra_m, oss.str()};
+        }
     }
 
     // L2 区间 (3-8m)：加权平均
