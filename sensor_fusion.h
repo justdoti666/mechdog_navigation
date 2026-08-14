@@ -76,6 +76,9 @@ public:
     std::optional<FusionResult> get_latest_result() const;
 
 private:
+    // 单元测试访问 (tests/test_fusion.cpp 专用, R-3: 测试调用真函数而非复刻逻辑)
+    friend class SensorFusionTestAccess;
+
     AstraProDriver* astra_;
     UltrasonicArrayDriver* ultrasonic_;
     InfraRedSensor* ir_;

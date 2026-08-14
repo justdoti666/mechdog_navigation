@@ -2,7 +2,7 @@
  * mechdog_navigation 主程序 - 带实时可视化窗口 (Windows GDI+)
  *
  * 默认以模拟模式运行: 无需硬件, 在 PC 上即可验证传感器融合与导航决策全链路。
- * 真机模式: 通过 CMake 选项 USE_WIRINGPI / USE_OPENNI2 编译, 并修改下方 use_simulated 参数。
+ * 真机模式: 通过 CMake 选项 USE_WIRINGPI / USE_ASTRA_SDK 编译, 并修改下方 use_simulated 参数。
  *
  * 构建 (Windows, 需要 GDI+):
  *   cmake -B build_vs -DCMAKE_CXX_STANDARD=17

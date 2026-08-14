@@ -141,8 +141,11 @@ struct EmergencyConfig {
 //           light >= ir_outdoor_min  -> outdoor     (超声波主导)
 //           之间                       -> semi_indoor (两者均衡)
 struct IrConfig {
-    static constexpr double ir_indoor_max  = 0.30; // 归一化红外强度上限: 室内
-    static constexpr double ir_outdoor_min = 0.70; // 归一化红外强度下限: 室外/强光
+    // R-2: 阈值与 IR_MAX_REF=20000 归一化分布同数量级 (FIX-4 改分母后同步):
+    // 25x 增益实测: 室内 200-2000 → 0.01-0.10, 窗边 2000-8000 → 0.10-0.40, 太阳直射 >20000 → clamp 1.0
+    // 原 0.30/0.70 会把窗边(0.10-0.40)大部分误判为 INDOOR; 最终值仍待硬件组按 docs/IR_CALIBRATION.md 标定
+    static constexpr double ir_indoor_max  = 0.10; // 归一化红外强度上限: 室内
+    static constexpr double ir_outdoor_min = 0.40; // 归一化红外强度下限: 室外/强光
     static constexpr double ir_sim_min     = 0.05; // 模拟模式红外最小值
     static constexpr double ir_sim_max     = 0.90; // 模拟模式红外最大值
 };

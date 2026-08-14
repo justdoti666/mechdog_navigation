@@ -274,10 +274,13 @@ double SensorFusion::calc_confidence(
         return 0.1;
     }
 
+    // R-1: 超声无效(兜底 4.5)时不参与一致性计算——兜底值不是真实距离,
+    // 用 |4.5-astra_m| 算 diff 会把 Astra 的置信度错误压到 0 (如 astra 8m 时)
+    if (!ultra_valid) return 0.8;  // 仅 Astra 单独可信度
+
     double diff = std::abs(ultra_m - astra_m);
     double consistency = std::max(0.0, 1.0 - diff / 2.0);
-    double base_confidence = ultra_valid ? 0.95 : 0.8;
-    return base_confidence * consistency;
+    return 0.95 * consistency;
 }
 
 // ========== 障碍物等级 ==========
