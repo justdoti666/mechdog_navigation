@@ -299,8 +299,9 @@ AstraFrame AstraProDriver::simulate_frame() {
         }
     }
 
-    // 环境: 模拟室内
-    frame.environment = EnvironmentType::INDOOR;
+    // 环境: 置 UNKNOWN, 让 determine_environment() 走红外模拟值 fallback,
+    // 使室内/半室内/室外三档在模拟中均可验证 (FIX-2)
+    frame.environment = EnvironmentType::UNKNOWN;
     frame.ambient_light_level = 0.1;
 
     // 区域分析

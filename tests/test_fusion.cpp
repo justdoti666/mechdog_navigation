@@ -19,6 +19,7 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <set>
 
 using namespace mechdog;
 
@@ -72,18 +73,22 @@ static void test_layer_fusion_boundaries() {
 
     astra.start();  // 启动采集线程, 产生有效模拟帧 (quality_score > 0)
 
-    // ir 模拟值 0~1 全覆盖, 环境类型必须是三种之一
-    for (int i = 0; i < 50; ++i) {
+    // FIX-3: ir 模拟值 0~1 全覆盖, 200 次迭代内必须出现全部三档环境
+    // (原实现环境恒 INDOOR 时三选一断言永远通过, 属名不副实的测试)
+    std::set<int> seen;
+    for (int i = 0; i < 200; ++i) {
         auto result = fusion.fuse();
-        CHECK(result.environment == EnvironmentType::INDOOR ||
-              result.environment == EnvironmentType::SEMI_INDOOR ||
-              result.environment == EnvironmentType::OUTDOOR);
+        seen.insert(static_cast<int>(result.environment));
         // 权重不变量: 两者之和为 1, 且均在 [0,1] 范围
         double wsum = result.effective_astra_weight + result.effective_ultrasonic_weight;
         CHECK(std::abs(wsum - 1.0) < 1e-6);
         CHECK(result.effective_astra_weight >= 0.0 && result.effective_astra_weight <= 1.0);
         CHECK(result.effective_ultrasonic_weight >= 0.0 && result.effective_ultrasonic_weight <= 1.0);
     }
+    // 三档覆盖: 若模拟环境被写死为单一档位, 此断言失败 (守护 FIX-2 的回归)
+    CHECK(seen.count(static_cast<int>(EnvironmentType::INDOOR)) &&
+          seen.count(static_cast<int>(EnvironmentType::SEMI_INDOOR)) &&
+          seen.count(static_cast<int>(EnvironmentType::OUTDOOR)));
 
     astra.stop();
 }
