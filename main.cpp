@@ -184,6 +184,15 @@ static void draw_scene(HDC hdc, int w, int h) {
         }
     }
 
+    // 加锁拷贝共享融合结果到局部 (窗口线程读, 主循环写, 防竞态; 与彩色帧同法, FIX-1)
+    FusionResult local_result;
+    bool have_result = false;
+    {
+        std::lock_guard<std::mutex> lock(g_viz_mutex);
+        local_result = g_latest_result;
+        have_result = g_have_result;
+    }
+
     int cx = w / 2;
     int cy = h / 2 + 20;
     int range_px = (int)(h * 0.34);   // 8m 对应像素
@@ -211,8 +220,8 @@ static void draw_scene(HDC hdc, int w, int h) {
     g.DrawRectangle(&body_ring_pen, cx - 22, cy - 22, 44, 44);
 
     // 障碍物点
-    if (g_have_result) {
-        for (const auto& kv : g_latest_result.obstacles) {
+    if (have_result) {
+        for (const auto& kv : local_result.obstacles) {
             double d = kv.second.distance_m;
             if (d <= 0.0 || d > max_range) continue;
 
@@ -251,8 +260,8 @@ static void draw_scene(HDC hdc, int w, int h) {
     g.DrawLine(&line, 0, h - 56, w, h - 56);
 
     std::wstring status;
-    if (g_have_result) {
-        auto& r = g_latest_result;
+    if (have_result) {
+        auto& r = local_result;
         status = L"action=" + widen(action_name(r.recommended_action)) +
                  L"   env=" + std::to_wstring((int)r.environment) +
                  L"   cliff=" + (r.cliff_detected ? L"YES" : L"no") +
