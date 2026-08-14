@@ -97,7 +97,7 @@ struct RealAstraContext {
 
     // 帧数据 (由回调线程写, 由 capture 线程读; 用各自锁)
     std::mutex frame_mutex;
-    std::vector<uint16_t> depth_buf;      // 最新深度 (uint16 mm)
+    std::vector<int16_t> depth_buf;       // 最新深度 (int16 mm, Astra SDK 原生类型, FIX-10)
     int depth_w = 0, depth_h = 0;
     ColorFrameData color;                 // 最新彩色 + 距离
     bool have_depth = false, have_color = false;
@@ -126,7 +126,7 @@ public:
         if (depth.is_valid() && depth.width() > 0) {
             int w = depth.width(), h = depth.height();
             ctx_.depth_buf.resize(w * h);
-            depth.copy_to(reinterpret_cast<int16_t*>(ctx_.depth_buf.data()));
+            depth.copy_to(ctx_.depth_buf.data());   // FIX-10: 类型已为 int16_t, 去 reinterpret_cast
             ctx_.depth_w = w;
             ctx_.depth_h = h;
             ctx_.have_depth = true;
@@ -138,7 +138,7 @@ public:
             int cy0 = h / 4, cy1 = h * 3 / 4;
             for (int y = cy0; y < cy1; ++y) {
                 for (int x = cx0; x < cx1; ++x) {
-                    uint16_t v = ctx_.depth_buf[y * w + x];
+                    int16_t v = ctx_.depth_buf[y * w + x];  // FIX-10: int16_t 原生读取
                     if (v >= AstraProDriver::MIN_VALID_DISTANCE_MM &&
                         v <= AstraProDriver::MAX_VALID_DISTANCE_MM) {
                         sum += v; ++n;
@@ -213,7 +213,7 @@ AstraFrame AstraProDriver::capture_real() {
     frame.depth_height = DEPTH_HEIGHT;
 
     // 从回调缓存取最新深度帧
-    std::vector<uint16_t> depth;
+    std::vector<int16_t> depth;   // FIX-10: 与 depth_buf 同类型
     int w = 0, h = 0;
     {
         std::lock_guard<std::mutex> guard(ctx.frame_mutex);
@@ -231,7 +231,15 @@ AstraFrame AstraProDriver::capture_real() {
         frame.depth_width = w;
         frame.depth_height = h;
     }
-    frame.depth_map = std::move(depth);
+    // int16_t 深度 (Astra SDK 原生) -> uint16_t depth_map (0=无效, 与模拟模式语义一致; FIX-10)
+    std::vector<uint16_t> depth_map(depth.size());
+    for (size_t i = 0; i < depth.size(); ++i) {
+        int16_t v = depth[i];
+        depth_map[i] = (v >= static_cast<int16_t>(MIN_VALID_DISTANCE_MM) &&
+                        v <= static_cast<int16_t>(MAX_VALID_DISTANCE_MM))
+                           ? static_cast<uint16_t>(v) : 0;
+    }
+    frame.depth_map = std::move(depth_map);
 
     // 区域分析
     frame.center_region = analyze_region(frame.depth_map, frame.depth_width,
