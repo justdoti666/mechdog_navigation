@@ -7,7 +7,7 @@
  *   使用官方 FrameListener 回调模式 (与 SDK 示例 DepthReaderEventCPP 一致):
  *   - 首次调用 capture_real 时初始化 StreamSet/Reader + 启动 Depth/Color 双流
  *   - 独立 update 线程持续 astra_update() 驱动帧回调
- *   - 回调内填充 latest_frame_ (深度) 与 color_cache_ (彩色 RGB + 距离叠加)
+ *   - 回调内填充 RealAstraContext::color (彩色 RGB + 距离叠加)
  *   - 该模式经真机验证: depth+color 双流 640x480 正常出帧
  */
 #pragma once
@@ -110,7 +110,6 @@ private:
     mutable std::mutex lock_;
 
     AstraFrame latest_frame_;
-    ColorFrameData color_cache_;
     std::unique_ptr<std::thread> capture_thread_;
     std::mt19937 rng_;
 
@@ -119,7 +118,6 @@ private:
 
     // 真机模式 (Astra SDK, 仅 USE_ASTRA_SDK 编译时启用)
     AstraFrame capture_real();
-    void real_update_loop();
 
     DepthRegion analyze_region(const std::vector<uint16_t>& depth_map,
                                int width, int height, const std::string& region);

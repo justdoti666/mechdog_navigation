@@ -19,7 +19,7 @@ AstraProDriver::AstraProDriver(bool use_simulated)
     : use_simulated_(use_simulated)
     , rng_(std::random_device{}()) {
     if (!use_simulated_) {
-        std::cout << "[Astra] 真实硬件模式（需 OpenNI2 支持）" << std::endl;
+        std::cout << "[Astra] 真实硬件模式（Orbbec Astra SDK）" << std::endl;
     }
 }
 
