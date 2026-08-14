@@ -134,8 +134,10 @@ struct MapConfig {
 // ============================================================
 struct PlannerConfig {
     static constexpr const char* algorithm          = "DWA";
-    static constexpr double  max_linear_velocity    = 0.5;  // 最大线速度 m/s
-    static constexpr double  max_angular_velocity   = 1.0;  // 最大角速度 rad/s
+    // FIX-8: 与底盘实际能力一致 (Stm32ChassisBridge 限幅 ±0.20 m/s / ±0.60 rad/s,
+    // 师兄 wheel_board_bridge_node 层2 同值)
+    static constexpr double  max_linear_velocity    = 0.20; // 最大线速度 m/s
+    static constexpr double  max_angular_velocity   = 0.60; // 最大角速度 rad/s
     static constexpr double  linear_accel           = 0.3;  // 线加速度 m/s²
     static constexpr double  angular_accel          = 0.5;  // 角加速度 rad/s²
     static constexpr double  goal_tolerance_m       = 0.1;  // 到达目标点容差
