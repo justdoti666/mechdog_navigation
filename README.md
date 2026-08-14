@@ -36,7 +36,7 @@
 |------|------|------|
 | 全局配置 | `config.h` | 传感器参数、融合分层策略、地图参数、规划参数、紧急避障阈值 |
 | 超声波驱动 | `sensor_ultrasonic.h/.cpp` | HC-SR04 驱动，4 颗分时轮询防串扰（含模拟模式） |
-| 深度相机驱动 | `sensor_astra.h/.cpp` | Astra Pro 驱动，通过 OpenNI2 获取深度图（含模拟模式；**OpenNI2 真机接口待实现**） |
+| 深度相机驱动 | `sensor_astra.h/.cpp` | Astra Pro 驱动，通过 Orbbec Astra SDK 获取深度图（含模拟模式；真机经 `USE_ASTRA_SDK` 编译） |
 | 红外强度驱动 | `sensor_ir.h/.cpp` | TSL2591 环境红外检测，用于环境自适应权重（含模拟模式） |
 | 传感器融合 | `sensor_fusion.h/.cpp` | 分层加权融合、环境自适应、障碍物分类、导航决策 |
 | 路径规划 | `path_planner.h/.cpp` | 导航动作 -> 速度指令映射（DWA 待实现） |
@@ -85,7 +85,7 @@
 
 - **CMake** >= 3.16
 - **C++17** 编译器 (GCC 8+ / Clang 7+)
-- **OpenNI2**（可选，Astra Pro 真实硬件模式，**接口待实现**）
+- **Orbbec Astra SDK**（可选，Astra Pro 真机模式，经 `-DUSE_ASTRA_SDK=ON -DASTRA_SDK_ROOT=<sdk根目录>` 启用）
 - **WiringPi**（可选，树莓派 GPIO 模式；注意原版已停止维护，建议使用社区 fork `github.com/WiringPi/WiringPi`）
 - **Linux i2c-dev**（可选，TSL2591 真机模式）
 
@@ -110,18 +110,18 @@ cmake ..
 # 树莓派 WiringPi 模式
 cmake .. -DUSE_WIRINGPI=ON
 
-# Astra Pro OpenNI2 模式
-cmake .. -DUSE_OPENNI2=ON
+# Astra Pro 真机模式 (Orbbec Astra SDK)
+cmake .. -DUSE_ASTRA_SDK=ON -DASTRA_SDK_ROOT=<sdk根目录>
 
 # 完整硬件模式
-cmake .. -DUSE_WIRINGPI=ON -DUSE_OPENNI2=ON
+cmake .. -DUSE_WIRINGPI=ON -DUSE_ASTRA_SDK=ON -DASTRA_SDK_ROOT=<sdk根目录>
 
 cmake --build .
 ```
 
 ## 模拟模式
 
-当 `USE_WIRINGPI` 和 `USE_OPENNI2` 均未启用时，系统进入模拟模式：
+当 `USE_WIRINGPI` 和 `USE_ASTRA_SDK` 均未启用时，系统进入模拟模式：
 
 - 超声波传感器返回随机模拟数据 (85% 空旷 / 10% 中距 / 5% 近距，底部 5% 悬崖)
 - Astra Pro 返回模拟深度帧
@@ -138,7 +138,7 @@ cmake --build .
 
 ## 已知限制
 
-1. **OpenNI2 真机接口待实现** — 当前 `USE_OPENNI2` 仅用于编译开关，`capture_frame()` 真机分支返回无效帧，深度数据全部来自模拟模式
+1. **Astra SDK 真机深度已实现** — 经 `USE_ASTRA_SDK` 编译后 `capture_frame()` 走 FrameListener 真机分支（深度+彩色双流）；未编译时回退模拟模式
 2. **环境红外阈值待标定** — `IrConfig` 为软件预设默认值，需硬件组按 `docs/IR_CALIBRATION.md` 实测后更新
 3. **wiringPi 真机 GPIO 未验证** — `measure_distance()` 的轮询实现受 Linux 调度抖动影响（1ms ≈ 17cm），后续可改边沿中断+时间戳
 
