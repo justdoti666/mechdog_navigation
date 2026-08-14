@@ -8,7 +8,6 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include <limits>
 
 namespace mechdog {
 
@@ -76,30 +75,9 @@ inline std::unordered_map<std::string, UltrasonicSensorEntry> get_ultrasonic_lay
 // ============================================================
 // 传感器融合距离分层策略
 // ============================================================
-enum class FusionLayer {
-    L0_ULTRASONIC_ONLY,  // 0-0.6m：仅超声波
-    L1_FUSION_NEAR,      // 0.6-3m：融合（保守）
-    L2_ASTRA_MAIN,       // 3-8m：Astra 为主
-    L3_ASTRA_ONLY,       // >8m：仅 Astra
-};
-
-struct FusionLayerConfig {
-    double range_min;          // 范围最小值(m)
-    double range_max;          // 范围最大值(m)
-    double astra_weight;
-    double ultrasonic_weight;
-    const char* strategy;
-    const char* description;
-};
-
-inline std::unordered_map<FusionLayer, FusionLayerConfig> get_fusion_layers() {
-    return {
-        {FusionLayer::L0_ULTRASONIC_ONLY, {0.0, 0.6, 0.0, 1.0, "Astra 盲区补偿", "Astra Pro 盲区，完全依赖超声波"}},
-        {FusionLayer::L1_FUSION_NEAR,     {0.6, 3.0, 0.6, 0.4, "取两者中更近的值", "0.6-3m：融合（保守）"}},
-        {FusionLayer::L2_ASTRA_MAIN,      {3.0, 8.0, 0.9, 0.1, "Astra 加权为主", "3-8m：Astra 为主"}},
-        {FusionLayer::L3_ASTRA_ONLY,      {8.0, std::numeric_limits<double>::infinity(), 1.0, 0.0, "仅 Astra", "超出超声波量程"}},
-    };
-}
+// 分层逻辑实现在 sensor_fusion.cpp::layer_fusion() (L0 超声盲区 / L1 保守取min / L2 加权 / L3 远距)。
+// 原 config.h 中的 FusionLayer / FusionLayerConfig / get_fusion_layers() 死代码已删除 (FIX-9):
+// 其 L1 权重(0.6/0.4)与实现"取min"策略矛盾, 且无任何调用方, 保留只会误导。
 
 // ============================================================
 // 环境自适应权重
