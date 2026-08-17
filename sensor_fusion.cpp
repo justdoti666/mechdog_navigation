@@ -10,17 +10,12 @@
 #include <sstream>
 #include <iomanip>
 #include <chrono>
-#include <optional>
 
 namespace mechdog {
 
 SensorFusion::SensorFusion(AstraProDriver* astra, UltrasonicArrayDriver* ultrasonic,
                            InfraRedSensor* ir)
     : astra_(astra), ultrasonic_(ultrasonic), ir_(ir) {
-}
-
-std::optional<FusionResult> SensorFusion::get_latest_result() const {
-    return last_fusion_;
 }
 
 // ========== 核心融合 ==========
@@ -69,7 +64,6 @@ FusionResult SensorFusion::fuse() {
         result.min_forward_distance_m, min_ultrasonic_cm, result.cliff_detected,
         result.obstacles, result.sensors_valid);
 
-    last_fusion_ = result;
     return result;
 }
 
@@ -276,7 +270,8 @@ FusedObstacle SensorFusion::build_bottom_obstacle(
     // 写进融合结果; 无效时兜底 0.0 (不参与 min_forward, 可视化 d<=0 跳过)
     obs.distance_m = bottom.valid ? bottom.distance_cm * kCmToM : 0.0;
     obs.confidence = bottom.valid ? 1.0 : 0.0;
-    obs.ultrasonic_dist_cm = bottom.distance_cm;
+    // Low 清理: 无效读数不再存 -1.0 (与 distance_m 兜底口径一致, 避免字段含噪声)
+    obs.ultrasonic_dist_cm = bottom.valid ? bottom.distance_cm : 0.0;
     obs.astra_dist_m = 8.0;
     obs.source = "仅超声波（底部）";
     obs.level = cliff_detected ? ObstacleLevel::CRITICAL : ObstacleLevel::SAFE;
@@ -384,7 +379,15 @@ NavigationAction SensorFusion::choose_direction(
 // M1: 全部传感器均无有效数据?
 bool SensorFusion::all_sensors_invalid(const AstraFrame& astra_frame,
                                        const UltrasonicArrayData& ultra_data) {
-    if (astra_frame.valid) return false;
+    // 与融合层 (fuse_direction) 同一口径: astra 有效 = 任一前向区域有有效深度像素。
+    // 不信任 frame.valid 本身 —— H1 后融合层把"帧有效但区域无有效像素" (镜头被挡/
+    // 全黑/深度全失效) 也按无效处理, 此处必须同口径, 否则 8.0m 兜底 + 超声全失效
+    // 组合下会漏判为"传感器有效"继续 FORWARD。
+    const bool astra_has_pixels =
+        astra_frame.left_region.valid_pixel_ratio > 0.0 ||
+        astra_frame.center_region.valid_pixel_ratio > 0.0 ||
+        astra_frame.right_region.valid_pixel_ratio > 0.0;
+    if (astra_has_pixels) return false;
     return !(ultra_data.front_left.valid || ultra_data.front_center.valid ||
              ultra_data.front_right.valid || ultra_data.bottom.valid);
 }

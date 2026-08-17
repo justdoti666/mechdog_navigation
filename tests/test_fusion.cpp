@@ -310,7 +310,7 @@ static void test_all_invalid_fail_closed() {
     InfraRedSensor ir(true);
     SensorFusion fusion(&astra, &ultrasonic, &ir);
 
-    // all_sensors_invalid 判定
+    // all_sensors_invalid 判定 (与融合层同一口径: astra 有效 = 任一前向区域有有效深度像素)
     AstraFrame bad_frame; bad_frame.valid = false;
     UltrasonicArrayData bad_ultra;  // 默认全 invalid
     CHECK(SensorFusionTestAccess::all_sensors_invalid(fusion, bad_frame, bad_ultra) == true);
@@ -319,8 +319,22 @@ static void test_all_invalid_fail_closed() {
     ok_ultra.front_center.valid = true; ok_ultra.front_center.distance_cm = 100.0;
     CHECK(SensorFusionTestAccess::all_sensors_invalid(fusion, bad_frame, ok_ultra) == false);
 
+    // M1 缺口: frame.valid=true 但所有区域无有效像素 (镜头被挡/全黑) ——
+    // 融合层 (H1 后) 已按无效处理, all_sensors_invalid 必须同口径, 否则仍 FORWARD
+    AstraFrame lens_covered; lens_covered.valid = true;  // regions 默认 valid_pixel_ratio=0
+    CHECK(SensorFusionTestAccess::all_sensors_invalid(fusion, lens_covered, bad_ultra) == true);
+
+    // 任一区域有有效像素 -> astra 有效
     AstraFrame ok_frame; ok_frame.valid = true;
+    ok_frame.center_region.valid_pixel_ratio = 0.5;
     CHECK(SensorFusionTestAccess::all_sensors_invalid(fusion, ok_frame, bad_ultra) == false);
+
+    // 镜头被挡 + 超声全失效 -> determine_action 必须 STOP (fail-closed 兜底)
+    std::unordered_map<std::string, FusedObstacle> obs_lens;
+    auto act_lens = SensorFusionTestAccess::determine_action(
+        fusion, /*min_forward_m=*/8.0, /*min_ultrasonic_cm=*/400.0,
+        /*cliff_detected=*/false, obs_lens, /*sensors_valid=*/false);
+    CHECK(act_lens == NavigationAction::STOP);
 
     // 全失效兜底组合 (min_fwd=8.0 兜底, ultra=400 兜底, 无悬崖) -> 必须 STOP
     std::unordered_map<std::string, FusedObstacle> obs;
