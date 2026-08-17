@@ -78,7 +78,7 @@ class UltrasonicArrayDriver {
 public:
     explicit UltrasonicArrayDriver(const std::unordered_map<std::string, UltrasonicSensorEntry>& layout);
 
-    /** 并行读取所有4颗传感器 */
+    /** 分时轮询读取所有4颗传感器 (串行, 间隔 30ms 防串扰, 一轮 ~120ms / 8Hz) */
     UltrasonicArrayData read_all();
 
     /** 清理所有传感器资源 */
