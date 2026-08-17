@@ -137,10 +137,19 @@ static void draw_scene(HDC hdc, int w, int h) {
             have_color = g_have_color;
         }
         if (have_color && local_color.valid && !local_color.rgb.empty()) {
+        // Astra SDK 返回 RGB 字节序; GDI+ PixelFormat24bppRGB 实际期望 BGR
+        // (Windows 历史遗留) -> 需交换 R/B 通道, 否则画面红蓝互换偏色
+        std::vector<BYTE> bgr_buf(local_color.rgb.size());
+        const BYTE* src = local_color.rgb.data();
+        for (size_t i = 0; i + 2 < bgr_buf.size(); i += 3) {
+            bgr_buf[i]     = src[i + 2];  // B
+            bgr_buf[i + 1] = src[i + 1];  // G
+            bgr_buf[i + 2] = src[i];      // R
+        }
         // 画彩色帧 (拉伸到窗口客户区)
         Bitmap bmp(local_color.width, local_color.height,
                    local_color.width * 3, PixelFormat24bppRGB,
-                   const_cast<BYTE*>(local_color.rgb.data()));
+                   bgr_buf.data());
         Rect dst(0, 0, w, h);
         g.DrawImage(&bmp, dst, 0, 0, local_color.width, local_color.height,
                     UnitPixel);
