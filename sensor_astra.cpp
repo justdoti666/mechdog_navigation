@@ -95,8 +95,7 @@ struct RealAstraContext;
 RealAstraContext& real_ctx();
 void ensure_real_streams(RealAstraContext& ctx);
 
-// 全局共享上下文: StreamSet/Reader + 回调监听
-class SampleListener;  // 前向声明 (成员指针)
+// 全局共享上下文: StreamSet/Reader + update 线程
 struct RealAstraContext {
     bool inited = false;
     astra::StreamSet streamSet;
@@ -105,15 +104,13 @@ struct RealAstraContext {
     std::atomic<bool> running{false};
     std::atomic<bool> streams_ready{false};
 
-    // 帧数据 (由回调线程写, 由 capture 线程读; 用各自锁)
-    std::mutex frame_mutex;
-    std::vector<int16_t> depth_buf;       // 最新深度 (int16 mm, Astra SDK 原生类型, FIX-10)
-    int depth_w = 0, depth_h = 0;
-    ColorFrameData color;                 // 最新彩色 + 距离
-    bool have_depth = false, have_color = false;
+    // reader 保护锁 (capture 线程和 get_color_frame 窗口线程都会访问 reader)
+    std::mutex reader_mutex;
 
-    // FrameListener 长期存活 (SDK 持有其指针, 局部变量析构会导致悬垂崩溃)
-    std::unique_ptr<SampleListener> listener;
+    // 彩色帧缓存 (capture_real 轮询时顺带更新, get_color_frame 只读)
+    std::mutex color_mutex;
+    ColorFrameData color;
+    bool have_color = false;
 
     RealAstraContext() {
         astra::initialize();
@@ -121,66 +118,13 @@ struct RealAstraContext {
         inited = true;
     }
 
-    // H2 修复: 停止 update 线程并 join —— 修复前 running 只置 true 从不置 false,
-    // static 局部对象在程序退出析构时 joinable std::thread 直接析构 -> std::terminate (Ctrl+C/关窗即崩)
+    // H2 修复: 停止 update 线程并 join
     void shutdown() {
         running = false;
         if (update_thread.joinable()) update_thread.join();
     }
 
     ~RealAstraContext() { shutdown(); }
-};
-
-// FrameListener: 帧就绪回调 (SDK 内部线程调用)
-class SampleListener : public astra::FrameListener {
-public:
-    explicit SampleListener(RealAstraContext& ctx) : ctx_(ctx) {}
-    virtual void on_frame_ready(astra::StreamReader& reader, astra::Frame& frame) override {
-        (void)reader;
-        auto depth = frame.get<astra::DepthFrame>();
-        auto color = frame.get<astra::ColorFrame>();
-
-        std::lock_guard<std::mutex> guard(ctx_.frame_mutex);
-
-        if (depth.is_valid() && depth.width() > 0) {
-            int w = depth.width(), h = depth.height();
-            ctx_.depth_buf.resize(w * h);
-            depth.copy_to(ctx_.depth_buf.data());   // FIX-10: 类型已为 int16_t, 去 reinterpret_cast
-            ctx_.depth_w = w;
-            ctx_.depth_h = h;
-            ctx_.have_depth = true;
-
-            // 中央区域平均距离/最近障碍 (每帧回调算一次, 避免 get_color_frame 重复遍历)
-            double min_mm = -1.0, sum = 0.0;
-            int n = 0;
-            int cx0 = w / 4, cx1 = w * 3 / 4;
-            int cy0 = h / 4, cy1 = h * 3 / 4;
-            for (int y = cy0; y < cy1; ++y) {
-                for (int x = cx0; x < cx1; ++x) {
-                    int16_t v = ctx_.depth_buf[y * w + x];  // FIX-10: int16_t 原生读取
-                    if (v >= AstraProDriver::MIN_VALID_DISTANCE_MM &&
-                        v <= AstraProDriver::MAX_VALID_DISTANCE_MM) {
-                        sum += v; ++n;
-                        if (min_mm < 0 || v < min_mm) min_mm = v;
-                    }
-                }
-            }
-            ctx_.color.center_distance_m = (n > 0) ? (sum / n) / 1000.0 : -1.0;
-            ctx_.color.nearest_distance_m = (min_mm > 0) ? min_mm / 1000.0 : -1.0;
-        }
-        if (color.is_valid() && color.width() > 0) {
-            int w = color.width(), h = color.height();
-            ctx_.color.rgb.resize(w * h * 3);
-            color.copy_to(reinterpret_cast<astra::RgbPixel*>(ctx_.color.rgb.data()));
-            ctx_.color.width = w;
-            ctx_.color.height = h;
-            ctx_.color.valid = true;
-            ctx_.have_color = true;
-        }
-    }
-
-private:
-    RealAstraContext& ctx_;
 };
 
 RealAstraContext& real_ctx() {
@@ -191,10 +135,6 @@ RealAstraContext& real_ctx() {
 // 启动双流 + update 线程 (仅一次)
 void ensure_real_streams(RealAstraContext& ctx) {
     if (ctx.streams_ready.load()) return;
-
-    // listener 必须长期存活 (SDK 持有指针, 局部对象会悬垂崩溃)
-    ctx.listener = std::make_unique<SampleListener>(ctx);
-    ctx.reader.add_listener(*ctx.listener);
 
     std::cout << "[Astra] 启动深度流..." << std::endl;
     auto depthStream = ctx.reader.stream<astra::DepthStream>();
@@ -209,7 +149,7 @@ void ensure_real_streams(RealAstraContext& ctx) {
 
     ctx.streams_ready = true;
 
-    // 独立线程持续 astra_update() 驱动回调
+    // 独立线程持续 astra_update() 驱动 SDK 内部状态 (轮询模式也需要)
     ctx.running = true;
     ctx.update_thread = std::thread([&ctx]() {
         while (ctx.running) {
@@ -219,12 +159,15 @@ void ensure_real_streams(RealAstraContext& ctx) {
     });
 }
 
-// H2: 停止 SDK update 线程 (定义与 real_ctx 同 TU)
+} // namespace (匿名: RealAstraContext/real_ctx/ensure_real_streams 内部链接)
+
+// H2: 停止 SDK update 线程
+// 定义必须在匿名命名空间外 (mechdog 直接作用域, 外部链接) 以匹配文件头部的声明 ——
+// 原定义放匿名 namespace 内 (内部链接) 导致 MSVC USE_ASTRA_SDK 构建 LNK2019。
+// real_ctx() 虽在匿名 namespace (内部链接), 但同一翻译单元内可正常调用。
 void shutdown_real_ctx() {
     real_ctx().shutdown();
 }
-
-} // namespace
 
 AstraFrame AstraProDriver::capture_real() {
     auto& ctx = real_ctx();
@@ -236,26 +179,60 @@ AstraFrame AstraProDriver::capture_real() {
     frame.depth_width  = DEPTH_WIDTH;
     frame.depth_height = DEPTH_HEIGHT;
 
-    // 从回调缓存取最新深度帧
-    std::vector<int16_t> depth;   // FIX-10: 与 depth_buf 同类型
+    // 真机修复: 轮询模式取帧 (SDK DepthReaderPoll 示例同法)。
+    // 原实现用 FrameListener 回调模式, Astra Pro 在回调模式下深度值恒 0
+    // (SDK 已知行为; DepthReaderPoll 轮询模式正常出值)。
+    std::vector<int16_t> depth;
     int w = 0, h = 0;
     {
-        std::lock_guard<std::mutex> guard(ctx.frame_mutex);
-        if (!ctx.have_depth) {
+        std::lock_guard<std::mutex> guard(ctx.reader_mutex);
+
+        // 短等待重试 astra_update() 直到 has_new_frame (同 rgb_stream read_frame)
+        bool got = false;
+        for (int attempt = 0; attempt < 5; ++attempt) {
+            astra_update();
+            if (ctx.reader.has_new_frame()) { got = true; break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        if (!got) {
             frame.valid = false;
             return frame;
         }
-        depth = ctx.depth_buf;
-        w = ctx.depth_w;
-        h = ctx.depth_h;
+
+        astra::Frame aframe = ctx.reader.get_latest_frame(0);  // timeout=0 非阻塞
+        auto depthFrame = aframe.get<astra::DepthFrame>();
+        auto colorFrame = aframe.get<astra::ColorFrame>();
+
+        if (!depthFrame.is_valid() || depthFrame.width() <= 0) {
+            frame.valid = false;
+            return frame;
+        }
+
+        w = depthFrame.width();
+        h = depthFrame.height();
+        depth.resize(w * h);
+        depthFrame.copy_to(depth.data());   // int16_t 原生 (FIX-10)
         frame.valid = true;
+
+        // 顺带更新彩色帧缓存 (窗口线程经 get_color_frame 读取)
+        if (colorFrame.is_valid() && colorFrame.width() > 0) {
+            std::lock_guard<std::mutex> clock(ctx.color_mutex);
+            int cw = colorFrame.width(), ch = colorFrame.height();
+            ctx.color.rgb.resize(cw * ch * 3);
+            colorFrame.copy_to(reinterpret_cast<astra::RgbPixel*>(ctx.color.rgb.data()));
+            ctx.color.width = cw;
+            ctx.color.height = ch;
+            ctx.color.valid = true;
+            ctx.have_color = true;
+        }
     }
+
     if (w != DEPTH_WIDTH || h != DEPTH_HEIGHT) {
-        // 实际分辨率可能与默认不同, 以实际为准
         frame.depth_width = w;
         frame.depth_height = h;
     }
-    // int16_t 深度 (Astra SDK 原生) -> uint16_t depth_map (0=无效, 与模拟模式语义一致; FIX-10)
+
+    // int16_t 深度 -> uint16_t depth_map (0=无效, 与模拟模式语义一致; FIX-10)
     std::vector<uint16_t> depth_map(depth.size());
     for (size_t i = 0; i < depth.size(); ++i) {
         int16_t v = depth[i];
@@ -273,31 +250,38 @@ AstraFrame AstraProDriver::capture_real() {
     frame.right_region  = analyze_region(frame.depth_map, frame.depth_width,
                                          frame.depth_height, "right");
 
-    // 环境判定: 深度图无效像素比例代理 (F3 决策: 默认 estimate_ambient_light)
+    // 环境判定: 深度图无效像素比例代理
     frame.ambient_light_level = estimate_ambient_light(frame.depth_map,
                                                        frame.depth_width,
                                                        frame.depth_height);
     frame.environment = classify_environment(frame.ambient_light_level);
 
+    // 彩色帧缓存补充距离信息 (从深度帧中央区域算)
+    {
+        std::lock_guard<std::mutex> clock(ctx.color_mutex);
+        if (frame.center_region.valid_pixel_ratio > 0) {
+            ctx.color.center_distance_m = frame.center_region.center_distance_m;
+            ctx.color.nearest_distance_m = frame.center_region.min_distance_m;
+        }
+    }
+
     return frame;
 }
 
-// 获取最新彩色帧 (RGB888) + 中央区域平均距离/最近障碍 (从回调缓存)
+// 获取最新彩色帧 (RGB888) + 中央区域平均距离/最近障碍
 ColorFrameData AstraProDriver::get_color_frame() {
     ColorFrameData out;
     if (use_simulated_) {
         return out;  // 模拟模式无彩色数据
     }
     auto& ctx = real_ctx();
-    std::lock_guard<std::mutex> guard(ctx.frame_mutex);
+    std::lock_guard<std::mutex> guard(ctx.color_mutex);
     if (!ctx.have_color) return out;
-    // 距离已在回调线程算好 (center_distance_m/nearest_distance_m), 直接浅拷贝返回
     out = ctx.color;
     return out;
 }
 
-// 预初始化硬件: 在 main 线程调用 (窗口线程/采集线程启动前)
-// 确保深度+彩色双流在 main 线程 start, 避免采集线程里首次 start 阻塞
+// 预初始化硬件: 在 main 纺程调用 (窗口线程/采集线程启动前)
 void AstraProDriver::init_hardware() {
     if (use_simulated_) return;
     auto& ctx = real_ctx();
