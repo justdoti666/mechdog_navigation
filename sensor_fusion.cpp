@@ -152,7 +152,10 @@ FusedObstacle SensorFusion::fuse_direction(
 
         if (region) {
             astra_dist_m = region->min_distance_m;
-            astra_valid = true;
+            // H1 修复: 区域无有效深度像素时 (valid_pixel_ratio==0, analyze_region
+            // 兜底 min_distance_m=8.0) 不得判为有效 —— 否则 8.0m 假读数会走 L3
+            // 把近处超声障碍整个丢弃 (报告 probe①: astra=8.0 无像素 + ultra=1.0 -> 8.0)
+            astra_valid = (region->valid_pixel_ratio > 0.0);
         }
     }
 
@@ -225,6 +228,18 @@ std::pair<double, std::string> SensorFusion::layer_fusion(
             oss << "仅Astra (L1,超声超量程,Astra=" << astra_m << "m)";
             return {astra_m, oss.str()};
         }
+    }
+
+    // L2/L3 区间 (>=3m): 保守取近 (H1 修复)
+    // 修复前 L2 加权平均/L3 直接返回 astra_m, 近处超声障碍(薄杆/低矮/玻璃/盲区边缘,
+    // Astra 测不到但超声测得到)会被远处 Astra 读数平均掉或直接丢弃 —— 违背 L1 已有的
+    // "取近" 设计意图, 且 L3 丢弃超声最危险。
+    // 守卫: ultra 有效(真实距离, 非 4.5 兜底)且比 Astra 更近 -> 直接取 ultra_m。
+    if (ultra_valid && ultra_m < astra_m) {
+        std::ostringstream oss;
+        oss << "融合(取近): 超声" << static_cast<int>(ultra_m * 100)
+            << "cm < Astra " << astra_m << "m";
+        return {ultra_m, oss.str()};
     }
 
     // L2 区间 (3-8m)：加权平均

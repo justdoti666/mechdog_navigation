@@ -204,6 +204,50 @@ static void test_invalid_ultrasonic_no_false_critical() {
     CHECK(level(d_good) == ObstacleLevel::DANGER); // 20cm -> DANGER(合理)
 }
 
+// H1: L2/L3 保守取近 —— 近处超声障碍不得被远处 Astra 加权平均/丢弃
+// 报告 probe(修复前): ① astra=8.0(无有效像素兜底)+ultra=1.0 -> 8.0 (L3 丢弃超声)
+//                    ② astra=7.9+ultra=1.0 -> 6.52 (L2 加权平均)
+//                    ③ astra=3.1+ultra=0.7 -> 2.62 (L2 加权平均)
+static void test_layer_fusion_take_nearest() {
+    AstraProDriver astra(true);
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    InfraRedSensor ir(true);
+    SensorFusion fusion(&astra, &ultrasonic, &ir);
+
+    // L3: astra 8.0 + ultra 1.0 -> 必须取近 1.0 (修复前 8.0)
+    auto [d1, s1] = SensorFusionTestAccess::layer_fusion(fusion, 1.0, 8.0, true, 0.8, 0.2);
+    CHECK(d1 == 1.0);
+    CHECK(s1.find("超声") != std::string::npos);  // source 标注取近来源
+
+    // L2: astra 7.9 + ultra 1.0 -> 必须取近 1.0 (修复前加权 6.52)
+    auto [d2, s2] = SensorFusionTestAccess::layer_fusion(fusion, 1.0, 7.9, true, 0.8, 0.2);
+    CHECK(d2 == 1.0);
+
+    // L2: astra 3.1 + ultra 0.7 -> 必须取近 0.7 (修复前加权 2.62)
+    auto [d3, s3] = SensorFusionTestAccess::layer_fusion(fusion, 0.7, 3.1, true, 0.8, 0.2);
+    CHECK(d3 == 0.7);
+
+    // L2: ultra 无效(兜底 4.5, 非真实距离) -> 仍用 Astra, 不得被兜底值污染
+    auto [d4, s4] = SensorFusionTestAccess::layer_fusion(fusion, 4.5, 7.0, true, 0.8, 0.2);
+    CHECK(d4 == 7.0);
+
+    // L2: ultra 远于 astra -> 取近不误伤, 保持加权 (3.5*0.8 + 4.4*0.2 = 3.68)
+    auto [d5, s5] = SensorFusionTestAccess::layer_fusion(fusion, 4.4, 3.5, true, 0.8, 0.2);
+    CHECK(std::abs(d5 - 3.68) < 1e-9);
+
+    // L0 盲区补偿不变: ultra < 0.6 直接返回
+    auto [d6, s6] = SensorFusionTestAccess::layer_fusion(fusion, 0.3, 5.0, true, 0.8, 0.2);
+    CHECK(d6 == 0.3);
+
+    // L1 保守取 min 不变: astra 2.0 + ultra 1.5 -> 1.5
+    auto [d7, s7] = SensorFusionTestAccess::layer_fusion(fusion, 1.5, 2.0, true, 0.8, 0.2);
+    CHECK(d7 == 1.5);
+
+    // 仅超声分支不变: astra 无效 + ultra 有效 -> ultra
+    auto [d8, s8] = SensorFusionTestAccess::layer_fusion(fusion, 2.0, 8.0, false, 0.8, 0.2);
+    CHECK(d8 == 2.0);
+}
+
 int main() {
     test_cliff_valid_check();
     test_min_forward_valid_filter();
@@ -211,6 +255,7 @@ int main() {
     test_bottom_invalid_no_negative_distance();
     test_confidence_ultra_invalid_keeps_astra();
     test_invalid_ultrasonic_no_false_critical();
+    test_layer_fusion_take_nearest();
 
     std::cout << "passed=" << g_passed << " failed=" << g_failed << std::endl;
     return g_failed == 0 ? 0 : 1;
