@@ -63,8 +63,11 @@ FusionResult SensorFusion::fuse() {
 
     // 7. 紧急避障检查
     double min_ultrasonic_cm = ultrasonic_data.get_min_forward_distance_cm();
+    // M1: 传感器有效性 (fail-closed: 全失效时 determine_action 直接 STOP)
+    result.sensors_valid = !all_sensors_invalid(astra_frame, ultrasonic_data);
     result.recommended_action = determine_action(
-        result.min_forward_distance_m, min_ultrasonic_cm, result.cliff_detected);
+        result.min_forward_distance_m, min_ultrasonic_cm, result.cliff_detected,
+        result.obstacles, result.sensors_valid);
 
     last_fusion_ = result;
     return result;
@@ -315,7 +318,15 @@ ObstacleLevel SensorFusion::classify_obstacle_level(double distance_m) {
 
 // ========== 动作决策 ==========
 NavigationAction SensorFusion::determine_action(
-    double min_forward_m, double min_ultrasonic_cm, bool cliff_detected) {
+    double min_forward_m, double min_ultrasonic_cm, bool cliff_detected,
+    const std::unordered_map<std::string, FusedObstacle>& obstacles,
+    bool sensors_valid) {
+
+    // M1 fail-closed: 全部传感器均无有效数据时, 兜底值 (8.0m/400cm) 不可信,
+    // 不得"假设无障碍"继续前进 —— 停车等待数据恢复 (上游闸门超时另有兜底)
+    if (!sensors_valid) {
+        return NavigationAction::STOP;
+    }
 
     // 最高优先级：悬崖检测
     if (cliff_detected) {
@@ -338,18 +349,16 @@ NavigationAction SensorFusion::determine_action(
     } else if (dist_cm <= EmergencyConfig::warning_dist_cm) {
         return NavigationAction::BACKWARD;
     } else if (dist_cm <= EmergencyConfig::safe_dist_cm) {
-        return choose_direction();
+        return choose_direction(obstacles);
     } else {
         return NavigationAction::FORWARD;
     }
 }
 
-NavigationAction SensorFusion::choose_direction() {
-    if (!last_fusion_) {
-        return NavigationAction::SLOW_FORWARD;
-    }
-
-    const auto& obstacles = last_fusion_->obstacles;
+NavigationAction SensorFusion::choose_direction(
+    const std::unordered_map<std::string, FusedObstacle>& obstacles) {
+    // M6: 直接使用当前帧障碍数据 (由 fuse() 传入), 不再读 last_fusion_ ——
+    // 旧实现读上一帧, 方向决策滞后一帧 (8Hz 下 ~125ms)
 
     double left_dist = 8.0, center_dist = 8.0, right_dist = 8.0;
     auto it = obstacles.find("left");
@@ -370,6 +379,14 @@ NavigationAction SensorFusion::choose_direction() {
     } else {
         return NavigationAction::BACKWARD;
     }
+}
+
+// M1: 全部传感器均无有效数据?
+bool SensorFusion::all_sensors_invalid(const AstraFrame& astra_frame,
+                                       const UltrasonicArrayData& ultra_data) {
+    if (astra_frame.valid) return false;
+    return !(ultra_data.front_left.valid || ultra_data.front_center.valid ||
+             ultra_data.front_right.valid || ultra_data.bottom.valid);
 }
 
 } // namespace mechdog

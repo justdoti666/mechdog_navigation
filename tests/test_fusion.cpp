@@ -8,7 +8,7 @@
  *   - calc_confidence() 一致性
  *
  * 构建/运行:
- *   g++ -std=c++17 test_fusion.cpp sensor_ultrasonic.cpp sensor_astra.cpp sensor_ir.cpp sensor_fusion.cpp -lpthread -o test_fusion
+ *   g++ -std=c++20 test_fusion.cpp sensor_ultrasonic.cpp sensor_astra.cpp sensor_ir.cpp sensor_fusion.cpp -lpthread -o test_fusion
  *   ./test_fusion
  */
 #include "../sensor_fusion.h"
@@ -114,6 +114,24 @@ public:
     static double calc_confidence(SensorFusion& f, double ultra_m, double astra_m,
                                   bool astra_valid) {
         return f.calc_confidence(ultra_m, astra_m, astra_valid);
+    }
+    // M6: 方向决策基于当前帧障碍 (参数显式传入, 不再读 last_fusion_)
+    static NavigationAction choose_direction(
+        SensorFusion& f, const std::unordered_map<std::string, FusedObstacle>& obstacles) {
+        return f.choose_direction(obstacles);
+    }
+    // M1: 动作决策带传感器有效性 (fail-closed)
+    static NavigationAction determine_action(
+        SensorFusion& f, double min_forward_m, double min_ultrasonic_cm,
+        bool cliff_detected,
+        const std::unordered_map<std::string, FusedObstacle>& obstacles,
+        bool sensors_valid) {
+        return f.determine_action(min_forward_m, min_ultrasonic_cm, cliff_detected,
+                                  obstacles, sensors_valid);
+    }
+    static bool all_sensors_invalid(SensorFusion& f, const AstraFrame& frame,
+                                    const UltrasonicArrayData& ultra) {
+        return f.all_sensors_invalid(frame, ultra);
     }
 };
 } // namespace mechdog
@@ -248,6 +266,75 @@ static void test_layer_fusion_take_nearest() {
     CHECK(d8 == 2.0);
 }
 
+// M6: 方向决策必须基于当前帧障碍, 而非上一帧 (last_fusion_)
+// 旧实现: choose_direction() 无参读 last_fusion_ -> 决策滞后一帧 (8Hz 下 ~125ms)
+static void test_choose_direction_uses_current_frame() {
+    AstraProDriver astra(true);
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    InfraRedSensor ir(true);
+    SensorFusion fusion(&astra, &ultrasonic, &ir);
+
+    std::unordered_map<std::string, FusedObstacle> obs;
+    FusedObstacle center; center.direction = "center"; center.distance_m = 0.30;  // 近, 触发转向
+    FusedObstacle left;   left.direction = "left";   left.distance_m = 5.0;       // 左开阔
+    FusedObstacle right;  right.direction = "right"; right.distance_m = 0.30;     // 右堵
+    obs["center"] = center; obs["left"] = left; obs["right"] = right;
+
+    // 左开阔右堵 -> 往开阔侧转 TURN_LEFT
+    CHECK(SensorFusionTestAccess::choose_direction(fusion, obs) == NavigationAction::TURN_LEFT);
+
+    // 反置: 右开阔左堵 -> TURN_RIGHT
+    obs["left"].distance_m = 0.30;
+    obs["right"].distance_m = 5.0;
+    CHECK(SensorFusionTestAccess::choose_direction(fusion, obs) == NavigationAction::TURN_RIGHT);
+
+    // center 开阔 -> 直行
+    obs["center"].distance_m = 3.0;
+    CHECK(SensorFusionTestAccess::choose_direction(fusion, obs) == NavigationAction::SLOW_FORWARD);
+
+    // 两侧都堵 (<= 0.25 warning 阈值) -> BACKWARD
+    obs["center"].distance_m = 0.30;
+    obs["left"].distance_m = 0.20;
+    obs["right"].distance_m = 0.20;
+    CHECK(SensorFusionTestAccess::choose_direction(fusion, obs) == NavigationAction::BACKWARD);
+
+    // 空数据 -> SLOW_FORWARD (默认兜底)
+    std::unordered_map<std::string, FusedObstacle> empty;
+    CHECK(SensorFusionTestAccess::choose_direction(fusion, empty) == NavigationAction::SLOW_FORWARD);
+}
+
+// M1: 全传感器失效 -> fail-closed STOP, 不得"假设无障碍"继续前进
+static void test_all_invalid_fail_closed() {
+    AstraProDriver astra(true);
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    InfraRedSensor ir(true);
+    SensorFusion fusion(&astra, &ultrasonic, &ir);
+
+    // all_sensors_invalid 判定
+    AstraFrame bad_frame; bad_frame.valid = false;
+    UltrasonicArrayData bad_ultra;  // 默认全 invalid
+    CHECK(SensorFusionTestAccess::all_sensors_invalid(fusion, bad_frame, bad_ultra) == true);
+
+    UltrasonicArrayData ok_ultra = bad_ultra;
+    ok_ultra.front_center.valid = true; ok_ultra.front_center.distance_cm = 100.0;
+    CHECK(SensorFusionTestAccess::all_sensors_invalid(fusion, bad_frame, ok_ultra) == false);
+
+    AstraFrame ok_frame; ok_frame.valid = true;
+    CHECK(SensorFusionTestAccess::all_sensors_invalid(fusion, ok_frame, bad_ultra) == false);
+
+    // 全失效兜底组合 (min_fwd=8.0 兜底, ultra=400 兜底, 无悬崖) -> 必须 STOP
+    std::unordered_map<std::string, FusedObstacle> obs;
+    auto act = SensorFusionTestAccess::determine_action(
+        fusion, /*min_forward_m=*/8.0, /*min_ultrasonic_cm=*/400.0,
+        /*cliff_detected=*/false, obs, /*sensors_valid=*/false);
+    CHECK(act == NavigationAction::STOP);
+
+    // 对照: 传感器有效时同输入 -> 正常 FORWARD (8m 开阔)
+    auto act2 = SensorFusionTestAccess::determine_action(
+        fusion, 8.0, 400.0, false, obs, /*sensors_valid=*/true);
+    CHECK(act2 == NavigationAction::FORWARD);
+}
+
 int main() {
     test_cliff_valid_check();
     test_min_forward_valid_filter();
@@ -256,6 +343,8 @@ int main() {
     test_confidence_ultra_invalid_keeps_astra();
     test_invalid_ultrasonic_no_false_critical();
     test_layer_fusion_take_nearest();
+    test_choose_direction_uses_current_frame();
+    test_all_invalid_fail_closed();
 
     std::cout << "passed=" << g_passed << " failed=" << g_failed << std::endl;
     return g_failed == 0 ? 0 : 1;

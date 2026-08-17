@@ -51,6 +51,7 @@ struct FusionResult {
     EnvironmentType environment                = EnvironmentType::UNKNOWN;
     bool astra_valid                           = false;
     bool cliff_detected                        = false;
+    bool sensors_valid                         = true;   // M1: 任一传感器有有效数据 (全失效 -> false)
     double effective_astra_weight              = 0.0;
     double effective_ultrasonic_weight          = 0.0;
     NavigationAction recommended_action        = NavigationAction::FORWARD;
@@ -112,8 +113,15 @@ private:
     ObstacleLevel classify_obstacle_level(double distance_m);
     NavigationAction determine_action(double min_forward_m,
                                        double min_ultrasonic_cm,
-                                       bool cliff_detected);
-    NavigationAction choose_direction();
+                                       bool cliff_detected,
+                                       const std::unordered_map<std::string, FusedObstacle>& obstacles,
+                                       bool sensors_valid);
+    NavigationAction choose_direction(
+        const std::unordered_map<std::string, FusedObstacle>& obstacles);
+
+    // M1: 全部传感器均无有效数据 (fail-closed 判定, 独立可测)
+    static bool all_sensors_invalid(const AstraFrame& astra_frame,
+                                    const UltrasonicArrayData& ultra_data);
 };
 
 } // namespace mechdog
