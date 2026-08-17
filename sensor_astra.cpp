@@ -15,6 +15,12 @@
 
 namespace mechdog {
 
+#ifdef USE_ASTRA_SDK
+// H2: 停止 SDK update 线程 (stop() 在其定义之前调用;
+//     实现在文件中部 USE_ASTRA_SDK 块内, 同一翻译单元)
+void shutdown_real_ctx();
+#endif
+
 AstraProDriver::AstraProDriver(bool use_simulated)
     : use_simulated_(use_simulated)
     , rng_(std::random_device{}()) {
@@ -43,6 +49,10 @@ void AstraProDriver::stop() {
         capture_thread_->join();
         capture_thread_.reset();
     }
+#ifdef USE_ASTRA_SDK
+    // H2: 停掉 SDK update 线程 (先 join capture 线程, 确保 capture_real 不再访问 ctx 后再停)
+    shutdown_real_ctx();
+#endif
     std::cout << "[Astra] 采集已停止" << std::endl;
 }
 
@@ -110,6 +120,15 @@ struct RealAstraContext {
         reader = streamSet.create_reader();
         inited = true;
     }
+
+    // H2 修复: 停止 update 线程并 join —— 修复前 running 只置 true 从不置 false,
+    // static 局部对象在程序退出析构时 joinable std::thread 直接析构 -> std::terminate (Ctrl+C/关窗即崩)
+    void shutdown() {
+        running = false;
+        if (update_thread.joinable()) update_thread.join();
+    }
+
+    ~RealAstraContext() { shutdown(); }
 };
 
 // FrameListener: 帧就绪回调 (SDK 内部线程调用)
@@ -200,6 +219,11 @@ void ensure_real_streams(RealAstraContext& ctx) {
     });
 }
 
+// H2: 停止 SDK update 线程 (定义与 real_ctx 同 TU)
+void shutdown_real_ctx() {
+    real_ctx().shutdown();
+}
+
 } // namespace
 
 AstraFrame AstraProDriver::capture_real() {
@@ -281,6 +305,13 @@ void AstraProDriver::init_hardware() {
     std::cout << "[Astra] 硬件预初始化完成" << std::endl;
 }
 #endif // USE_ASTRA_SDK
+
+#ifndef USE_ASTRA_SDK
+// C1 修复: 非 SDK 构建 (Windows 模拟模式) 空实现, 消除 LNK2019
+// (头文件无条件声明 + main.cpp:345/398 无条件调用; 模拟模式本就不产生真机数据)
+void AstraProDriver::init_hardware() {}
+ColorFrameData AstraProDriver::get_color_frame() { return {}; }
+#endif
 
 AstraFrame AstraProDriver::get_latest_frame() const {
     std::lock_guard<std::mutex> guard(lock_);
