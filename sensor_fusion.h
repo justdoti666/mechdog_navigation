@@ -8,7 +8,6 @@
 #include "sensor_ultrasonic.h"
 #include "sensor_astra.h"
 #include "sensor_ir.h"
-#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -73,9 +72,6 @@ public:
     /** 执行一次传感器融合 */
     FusionResult fuse();
 
-    /** 获取最近一次融合结果 */
-    std::optional<FusionResult> get_latest_result() const;
-
 private:
     // 单元测试访问 (tests/test_fusion.cpp 专用, R-3: 测试调用真函数而非复刻逻辑)
     friend class SensorFusionTestAccess;
@@ -83,8 +79,6 @@ private:
     AstraProDriver* astra_;
     UltrasonicArrayDriver* ultrasonic_;
     InfraRedSensor* ir_;
-
-    std::optional<FusionResult> last_fusion_;
 
     static constexpr double kCmToM = 0.01;
 

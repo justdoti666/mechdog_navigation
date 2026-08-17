@@ -48,6 +48,7 @@ struct UltrasonicConfig {
     static constexpr double  speed_of_sound     = 34300.0; // 声速 cm/s at 20°C
     static constexpr double  timeout_sec        = 0.025;   // 超时 ~4m
     static constexpr double  min_interval_sec   = 0.05;    // 最小测量间隔 50ms
+    static constexpr double  cliff_threshold_cm = 30.0;    // 底部悬崖判定阈值 (安装高度相关, 标定见 docs/IR_CALIBRATION.md 同类流程)
 };
 
 // ============================================================
@@ -119,8 +120,6 @@ struct PlannerConfig {
     static constexpr double  linear_accel           = 0.3;  // 线加速度 m/s²
     static constexpr double  angular_accel          = 0.5;  // 角加速度 rad/s²
     static constexpr double  goal_tolerance_m       = 0.1;  // 到达目标点容差
-    static constexpr double  obstacle_safety_dist_m = 0.3;  // 障碍物安全距离
-    static constexpr double  emergency_stop_dist_m  = 0.1;  // 紧急停止距离
 };
 
 // ============================================================
@@ -128,7 +127,7 @@ struct PlannerConfig {
 // ============================================================
 struct EmergencyConfig {
     static constexpr double  critical_dist_cm = 10.0; // 临界距离，强制停止
-    static constexpr double  warning_dist_cm  = 25.0; // 警告距离，减速
+    static constexpr double  warning_dist_cm  = 25.0; // 警告距离，后退 (实现为 BACKWARD, 非减速)
     static constexpr double  safe_dist_cm     = 50.0; // 安全距离，正常行驶
 };
 

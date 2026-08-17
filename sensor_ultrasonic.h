@@ -43,9 +43,10 @@ struct UltrasonicArrayData {
 /** 单个超声波传感器驱动 */
 class UltrasonicSensor {
 public:
-    static constexpr double SPEED_OF_SOUND  = 34300.0;  // cm/s at 20°C
-    static constexpr double TIMEOUT_SEC     = 0.025;    // ~4m 最大量程
-    static constexpr double MIN_INTERVAL_SEC = 0.05;    // 50ms
+    // 常量统一引用 config.h UltrasonicConfig (去重: 原各存一份易失同步)
+    static constexpr double SPEED_OF_SOUND  = UltrasonicConfig::speed_of_sound;    // cm/s at 20°C
+    static constexpr double TIMEOUT_SEC     = UltrasonicConfig::timeout_sec;       // ~4m 最大量程
+    static constexpr double MIN_INTERVAL_SEC = UltrasonicConfig::min_interval_sec; // 50ms
 
     UltrasonicSensor(const std::string& name, int trig_pin, int echo_pin,
                      double yaw_offset_deg = 0.0, double pitch_offset_deg = 0.0);

@@ -20,6 +20,7 @@
 
 #include <chrono>
 #include <csignal>
+#include <atomic>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
@@ -34,8 +35,10 @@
 
 using namespace mechdog;
 
-static volatile std::sig_atomic_t g_stop = 0;
-void on_signal(int) { g_stop = 1; }
+// 跨线程退出标志: 信号处理器/窗口线程写, 主循环读 (Low 清理: 原 sig_atomic_t
+// 仅保证对信号处理器的原子性, 跨线程共享需 atomic; int 为 lock-free, 信号处理器可用)
+static std::atomic<int> g_stop{0};
+void on_signal(int) { g_stop.store(1); }
 
 #ifdef _WIN32
 
@@ -295,12 +298,12 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 1;
         case WM_CLOSE:
             g_window_open = 0;
-            g_stop = 1;
+            g_stop.store(1);
             DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
             g_window_open = 0;
-            g_stop = 1;
+            g_stop.store(1);
             PostQuitMessage(0);
             return 0;
     }
@@ -413,7 +416,7 @@ int main(int argc, char** argv) {
     std::cout << "关闭可视化窗口 或 Ctrl+C 退出" << std::endl << std::endl;
 
     unsigned int tick = 0;
-    while (!g_stop) {
+    while (!g_stop.load()) {
         auto result = fusion.fuse();
 
         auto cmd = planner.plan(result);

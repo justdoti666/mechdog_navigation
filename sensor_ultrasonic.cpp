@@ -31,10 +31,10 @@ double UltrasonicArrayData::get_min_forward_distance_cm() const {
 }
 
 bool UltrasonicArrayData::get_cliff_detected() const {
-    // 底部传感器读数 > 30cm 认为有跌落风险
+    // 底部传感器读数 > 阈值 认为有跌落风险 (阈值见 config.h UltrasonicConfig, 安装高度相关)
     // 修复(F4): 必须检查 valid —— 真机超时返回 -1.0, 若只看数值会被判"安全",
     // 而回波超时往往正是量程内无可反射地面(深坑/大台阶), 应默认判为有风险
-    return !bottom.valid || bottom.distance_cm > 30.0;
+    return !bottom.valid || bottom.distance_cm > UltrasonicConfig::cliff_threshold_cm;
 }
 
 // ============================================================
