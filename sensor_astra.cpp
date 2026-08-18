@@ -101,16 +101,19 @@ struct RealAstraContext;
 RealAstraContext& real_ctx();
 void ensure_real_streams(RealAstraContext& ctx);
 
-// 全局共享上下文: StreamSet/Reader (单线程轮询取帧, D1 后无独立 update 线程)
+// 全局共享上下文: StreamSet/Reader (单执行者轮询取帧, D1 修正版)
 struct RealAstraContext {
     bool inited = false;
     astra::StreamSet streamSet;
     astra::StreamReader reader;
     std::atomic<bool> streams_ready{false};
 
-    // D2 修复: reader_mutex 现仅由 capture 线程轮询取帧时使用 (capture_real),
-    // get_color_frame 只碰 color_mutex 不访问 reader。保留该锁保护后续潜在的
-    // reader 访问, 但删除 update 线程后它是单用户锁 (无并发但仍具保护语义)。
+    // D2 修正: reader 保护锁 —— capture_real 轮询取帧持有。单执行者模式下
+    // (SDK 官方 DepthReaderPoll 同法) 锁内自 pump + 取帧, 无并发线程访问 reader;
+    // 保留锁保护后续潜在的 reader 访问 (get_color_frame 只碰 color_mutex)。
+    // (D1: 原 update 线程与 capture_real 并发调用 astra_update() 未文档化线程安全;
+    //  "删线程"方案最初尝试用独立线程 + 简单短 pump, 真机实测出不了帧, 遂回归
+    //   单线程自 pump 模式 —— 见 capture_real 注释)
     std::mutex reader_mutex;
 
     // 彩色帧缓存 (capture_real 轮询时顺带更新, get_color_frame 只读)
@@ -124,7 +127,7 @@ struct RealAstraContext {
         inited = true;
     }
 
-    // D1: update 线程已删除, shutdown 不再需 join 线程
+    // D1: 单执行者模式无需停线程; 保留 inited 标志供后续惰性初始化判空
     void shutdown() { inited = false; }
 
     ~RealAstraContext() { shutdown(); }
@@ -151,14 +154,6 @@ void ensure_real_streams(RealAstraContext& ctx) {
     std::cout << "[Astra] 彩色流已启动" << std::endl;
 
     ctx.streams_ready = true;
-
-    // D1 修复: 删除独立 update 线程。
-    // 旧实现: 独立线程每 5ms 无锁调用 astra_update() 驱动 SDK 事件泵, 而 capture_real()
-    // 在 reader_mutex 内也调 astra_update() 自 pump (见 capture_real) —— SDK 事件泵被
-    // 两个线程并发驱动, Astra SDK 未文档化线程安全 (本轮报告 D1)。Astra 轮询模式
-    // 取帧 (DepthReaderPoll / rgb_stream.cpp read_frame) 本就是单线程自 pump, capture_real
-    // 每帧轮询已足够驱动 SDK; 删除 update 线程后事件泵仅由 capture 线程驱动, 消除并发。
-    // (真机长时运行需压测确认帧率/卡顿, 理论依据: rgb_stream 单线程轮询已验证可行)
 }
 
 } // namespace (匿名: RealAstraContext/real_ctx/ensure_real_streams 内部链接)
@@ -189,19 +184,22 @@ AstraFrame AstraProDriver::capture_real() {
     {
         std::lock_guard<std::mutex> guard(ctx.reader_mutex);
 
-        // 短等待重试 astra_update() 直到 has_new_frame (同 rgb_stream read_frame)
+        // D1 修正: 无独立事件泵线程 —— 与 SDK 官方 DepthReaderPoll 相同的单执行者
+        // 模式: 本线程在 reader_mutex 内持续 astra_update() + 查帧, 天然无并发。
+        // (此前"删线程 + 5×2ms 短窗口"真机实测出不了帧: 30fps 一帧 = 33ms, 10ms 窗口
+        //  经常错过整帧; 且两次取帧之间无人 pump。现用 ~50ms 轮询窗口覆盖帧周期。)
         bool got = false;
-        for (int attempt = 0; attempt < 5; ++attempt) {
+        for (int attempt = 0; attempt < 10; ++attempt) {
             astra_update();
             if (ctx.reader.has_new_frame()) { got = true; break; }
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         if (!got) {
             frame.valid = false;
             return frame;
         }
 
-        astra::Frame aframe = ctx.reader.get_latest_frame(0);  // timeout=0 非阻塞
+        astra::Frame aframe = ctx.reader.get_latest_frame(0);  // 非阻塞取最新
         auto depthFrame = aframe.get<astra::DepthFrame>();
         auto colorFrame = aframe.get<astra::ColorFrame>();
 
