@@ -51,7 +51,13 @@ void AstraProDriver::stop() {
     }
 #ifdef USE_ASTRA_SDK
     // H2: 停掉 SDK update 线程 (先 join capture 线程, 确保 capture_real 不再访问 ctx 后再停)
-    shutdown_real_ctx();
+    // N2 修复: 仅真机模式才触碰 SDK。旧实现无条件 shutdown_real_ctx(), 而 real_ctx() 首次
+    // 构造会 astra::initialize() + create_reader() —— 即使纯模拟运行, 退出时也会拉起一次
+    // SDK 初始化; 若 initialize() 在无相机/驱动异常时抛异常, 会从 stop() 传出 (main 显式
+    // 调用路径) 导致退出即崩。
+    if (!use_simulated_) {
+        shutdown_real_ctx();
+    }
 #endif
     std::cout << "[Astra] 采集已停止" << std::endl;
 }
@@ -95,16 +101,16 @@ struct RealAstraContext;
 RealAstraContext& real_ctx();
 void ensure_real_streams(RealAstraContext& ctx);
 
-// 全局共享上下文: StreamSet/Reader + update 线程
+// 全局共享上下文: StreamSet/Reader (单线程轮询取帧, D1 后无独立 update 线程)
 struct RealAstraContext {
     bool inited = false;
     astra::StreamSet streamSet;
     astra::StreamReader reader;
-    std::thread update_thread;
-    std::atomic<bool> running{false};
     std::atomic<bool> streams_ready{false};
 
-    // reader 保护锁 (capture 线程和 get_color_frame 窗口线程都会访问 reader)
+    // D2 修复: reader_mutex 现仅由 capture 线程轮询取帧时使用 (capture_real),
+    // get_color_frame 只碰 color_mutex 不访问 reader。保留该锁保护后续潜在的
+    // reader 访问, 但删除 update 线程后它是单用户锁 (无并发但仍具保护语义)。
     std::mutex reader_mutex;
 
     // 彩色帧缓存 (capture_real 轮询时顺带更新, get_color_frame 只读)
@@ -118,11 +124,8 @@ struct RealAstraContext {
         inited = true;
     }
 
-    // H2 修复: 停止 update 线程并 join
-    void shutdown() {
-        running = false;
-        if (update_thread.joinable()) update_thread.join();
-    }
+    // D1: update 线程已删除, shutdown 不再需 join 线程
+    void shutdown() { inited = false; }
 
     ~RealAstraContext() { shutdown(); }
 };
@@ -149,14 +152,13 @@ void ensure_real_streams(RealAstraContext& ctx) {
 
     ctx.streams_ready = true;
 
-    // 独立线程持续 astra_update() 驱动 SDK 内部状态 (轮询模式也需要)
-    ctx.running = true;
-    ctx.update_thread = std::thread([&ctx]() {
-        while (ctx.running) {
-            astra_update();
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-    });
+    // D1 修复: 删除独立 update 线程。
+    // 旧实现: 独立线程每 5ms 无锁调用 astra_update() 驱动 SDK 事件泵, 而 capture_real()
+    // 在 reader_mutex 内也调 astra_update() 自 pump (见 capture_real) —— SDK 事件泵被
+    // 两个线程并发驱动, Astra SDK 未文档化线程安全 (本轮报告 D1)。Astra 轮询模式
+    // 取帧 (DepthReaderPoll / rgb_stream.cpp read_frame) 本就是单线程自 pump, capture_real
+    // 每帧轮询已足够驱动 SDK; 删除 update 线程后事件泵仅由 capture 线程驱动, 消除并发。
+    // (真机长时运行需压测确认帧率/卡顿, 理论依据: rgb_stream 单线程轮询已验证可行)
 }
 
 } // namespace (匿名: RealAstraContext/real_ctx/ensure_real_streams 内部链接)
@@ -380,15 +382,19 @@ DepthRegion AstraProDriver::analyze_region(const std::vector<uint16_t>& depth_ma
     reg.min_distance_m    = valid_count > 0 ? min_v / 1000.0 : MAX_VALID_DISTANCE_MM / 1000.0;
     reg.max_distance_m    = valid_count > 0 ? max_v / 1000.0 : 0.0;
     reg.obstacle_count    = valid_count;
-    reg.quality_score     = calc_quality(valid);
+    reg.quality_score     = calc_quality(valid, total);
 
     return reg;
 }
 
-double AstraProDriver::calc_quality(const std::vector<double>& valid_values) {
-    if (valid_values.empty()) return 0.0;
-    // 质量 = 有效像素比例 (相对满帧)
-    return std::min(1.0, (double)valid_values.size() / (DEPTH_WIDTH * DEPTH_HEIGHT * 0.5));
+double AstraProDriver::calc_quality(const std::vector<double>& valid_values,
+                                    int region_pixels) {
+    if (valid_values.empty() || region_pixels <= 0) return 0.0;
+    // N1 修复: 质量 = 有效像素 / 本区域像素数。
+    // (旧实现分母用半幅满帧 DEPTH_WIDTH*DEPTH_HEIGHT*0.5 = 153600, 而 center 区域
+    //  只有 76800 像素 -> quality_score 数学上限 0.5, indoor 权重被腰斩成 0.8*0.5=0.4,
+    //  环境自适应权重被系统性打折。左右区域上限更只有 0.25。)
+    return std::min(1.0, (double)valid_values.size() / (double)region_pixels);
 }
 
 double AstraProDriver::estimate_ambient_light(const std::vector<uint16_t>& depth_map,

@@ -17,9 +17,11 @@
 #include "../sensor_ir.h"
 
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <set>
+#include <thread>
 
 using namespace mechdog;
 
@@ -105,6 +107,13 @@ public:
     }
     static ObstacleLevel classify_obstacle_level(SensorFusion& f, double dist_m) {
         return f.classify_obstacle_level(dist_m);
+    }
+    // A1: 暴露 fuse_direction 以验证方向级失效标记
+    static FusedObstacle fuse_direction(SensorFusion& f, const std::string& dir,
+                                        const AstraFrame& frame,
+                                        const UltrasonicArrayData& ultra,
+                                        double astra_w, double ultra_w) {
+        return f.fuse_direction(dir, frame, ultra, astra_w, ultra_w);
     }
     static FusedObstacle build_bottom_obstacle(SensorFusion& f,
                                                const UltrasonicReading& bottom,
@@ -303,6 +312,119 @@ static void test_choose_direction_uses_current_frame() {
     CHECK(SensorFusionTestAccess::choose_direction(fusion, empty) == NavigationAction::SLOW_FORWARD);
 }
 
+// N1: quality_score 归一化分母必须为本区域像素数, 不得是半幅满帧。
+// 修复前 center 区域 76800 像素 / 分母 153600 -> quality 数学上限 0.5,
+// indoor 权重被腰斩成 0.8*0.5=0.4。修复后完美模拟帧 quality 应接近 1.0。
+static void test_quality_score_not_halved() {
+    AstraProDriver astra(true);
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    InfraRedSensor ir(true);
+    SensorFusion fusion(&astra, &ultrasonic, &ir);
+    astra.start();  // 捕获线程
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));  // 等待首帧就绪
+
+    // 模拟帧全填有效距离 -> quality 应能超过 0.5 (修复前恒 ==0.5)
+    double max_quality = 0.0;
+    for (int i = 0; i < 60; ++i) {
+        auto f = astra.get_latest_frame();
+        if (!f.valid || f.depth_map.empty()) continue;
+        if (f.center_region.quality_score > max_quality)
+            max_quality = f.center_region.quality_score;
+    }
+    CHECK(max_quality > 0.6);   // 修复前恒 0.5, 修复后应接近 1.0
+
+    // 完美帧 + indoor -> indoor 权重应恢复接近 0.8 (不被腰斩)
+    // 用 explore: indoor base 0.8, quality 接近 1 -> astra_w 接近 0.8
+    double astra_w = 0.0;
+    for (int i = 0; i < 60; ++i) {
+        auto result = fusion.fuse();
+        if (result.environment == EnvironmentType::INDOOR && result.astra_valid) {
+            astra_w = result.effective_astra_weight;
+            break;
+        }
+    }
+    if (astra_w > 0.0) {
+        CHECK(astra_w > 0.5);   // 修复前 indoor 理想时 0.4, 修复后应 >0.5
+    }
+
+    astra.stop();
+}
+
+// A1: 单方向双侧失效 (valid=false) 时, 该方向的 8.0m "假设无障碍" 兜底值
+// 不得被当作最开阔盲区参与转向决策 —— 否则机器人会转向实际被遮挡的一侧。
+static void test_choose_direction_ignores_invalid_direction() {
+    AstraProDriver astra(true);
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    InfraRedSensor ir(true);
+    SensorFusion fusion(&astra, &ultrasonic, &ir);
+
+    std::unordered_map<std::string, FusedObstacle> obs;
+    FusedObstacle center; center.direction = "center"; center.distance_m = 0.30;  // 近, 需转向
+    FusedObstacle left;   left.direction = "left";   left.distance_m = 0.30;      // 有效读数
+    FusedObstacle right;  right.direction = "right"; right.distance_m = 8.0;
+    right.valid = false;   // A1: 右侧双侧失效 —— 8.0m 是"假设无障碍"兜底, 非真实
+    obs["center"] = center; obs["left"] = left; obs["right"] = right;
+
+    // 修复前: right_dist=8.0 被当最开阔 -> TURN_RIGHT (转向盲区!)
+    // 修复后: 排除右侧, 左侧为唯一有效读数且 > warning(0.25) -> TURN_LEFT (远离盲区)
+    CHECK(SensorFusionTestAccess::choose_direction(fusion, obs) == NavigationAction::TURN_LEFT);
+
+    // 轻证: 若左侧也堵(<=warning), 则唯一可行侧(右)失效 -> 保守 BACKWARD
+    obs["left"].distance_m = 0.20;
+    CHECK(SensorFusionTestAccess::choose_direction(fusion, obs) == NavigationAction::BACKWARD);
+
+    // 单侧有效且开阔: 左 5.0 (有效), 右 8.0 (失效) -> 只能转向左侧 (远离盲区)
+    obs["left"].distance_m = 5.0;
+    CHECK(SensorFusionTestAccess::choose_direction(fusion, obs) == NavigationAction::TURN_LEFT);
+
+    // 中心失效时不作为开阔依据: 中心 8.0 失效 + 左/右 0.20 (均堵, <=warning) ->
+    // 唯一可能缓行的依据(center 开阔)已失效, 两侧又都不可转向 -> 保守 BACKWARD
+    std::unordered_map<std::string, FusedObstacle> obs2;
+    FusedObstacle c2; c2.direction = "center"; c2.distance_m = 8.0; c2.valid = false;
+    FusedObstacle l2; l2.direction = "left";   l2.distance_m = 0.20;
+    FusedObstacle r2; r2.direction = "right";  r2.distance_m = 0.20;
+    obs2["center"] = c2; obs2["left"] = l2; obs2["right"] = r2;
+    // center 失效不作为开阔依据(SLOW_FORWARD 需 center_ok); 两侧堵 -> BACKWARD
+    CHECK(SensorFusionTestAccess::choose_direction(fusion, obs2) == NavigationAction::BACKWARD);
+
+    // 三个前向方向全部失效 -> 无可靠方向信息 -> 保守 SLOW_FORWARD
+    std::unordered_map<std::string, FusedObstacle> obs3;
+    FusedObstacle c3; c3.direction = "center"; c3.distance_m = 8.0; c3.valid = false;
+    FusedObstacle l3; l3.direction = "left";   l3.distance_m = 8.0; l3.valid = false;
+    FusedObstacle r3; r3.direction = "right";  r3.distance_m = 8.0; r3.valid = false;
+    obs3["center"] = c3; obs3["left"] = l3; obs3["right"] = r3;
+    CHECK(SensorFusionTestAccess::choose_direction(fusion, obs3) == NavigationAction::SLOW_FORWARD);
+}
+
+// A1 (全链路): fuse_direction 对双侧失效方向标记 valid=false, fuse() 的
+// min_forward_distance_m 排除该方向 —— 单方向失明不污染前方最小距离。
+static void test_fuse_direction_marks_blind_direction_invalid() {
+    AstraProDriver astra(true);
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    InfraRedSensor ir(true);
+    SensorFusion fusion(&astra, &ultrasonic, &ir);
+
+    // 构造: 左侧 Astra 区域无有效像素 (valid_pixel_ratio=0) + 左侧超声无效
+    AstraFrame frame; frame.valid = true;
+    frame.center_region.valid_pixel_ratio = 0.9;  // 中央有效
+    frame.left_region.valid_pixel_ratio = 0.0;    // 左侧无像素
+    frame.right_region.valid_pixel_ratio = 0.9;   // 右侧有效
+
+    UltrasonicArrayData ultra;
+    ultra.front_center.valid = true;  ultra.front_center.distance_cm = 100.0;
+    ultra.front_right.valid = true;   ultra.front_right.distance_cm = 100.0;
+    ultra.front_left.valid = false;   // 左侧超声失效
+
+    auto left_obs = SensorFusionTestAccess::fuse_direction(
+        fusion, "left", frame, ultra, 0.8, 0.2);
+    CHECK(left_obs.valid == false);            // A1: 双侧失效 -> 标记无效
+    CHECK(left_obs.distance_m == 8.0);         // 兜底值仍在 (仅供可视化) 但不参与决策
+
+    auto right_obs = SensorFusionTestAccess::fuse_direction(
+        fusion, "right", frame, ultra, 0.8, 0.2);
+    CHECK(right_obs.valid == true);            // 右侧 Astar+超声 均有效
+}
+
 // M1: 全传感器失效 -> fail-closed STOP, 不得"假设无障碍"继续前进
 static void test_all_invalid_fail_closed() {
     AstraProDriver astra(true);
@@ -358,6 +480,9 @@ int main() {
     test_invalid_ultrasonic_no_false_critical();
     test_layer_fusion_take_nearest();
     test_choose_direction_uses_current_frame();
+    test_quality_score_not_halved();
+    test_choose_direction_ignores_invalid_direction();
+    test_fuse_direction_marks_blind_direction_invalid();
     test_all_invalid_fail_closed();
 
     std::cout << "passed=" << g_passed << " failed=" << g_failed << std::endl;

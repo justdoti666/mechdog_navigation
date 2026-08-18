@@ -121,7 +121,7 @@ private:
 
     DepthRegion analyze_region(const std::vector<uint16_t>& depth_map,
                                int width, int height, const std::string& region);
-    double calc_quality(const std::vector<double>& valid_values);
+    double calc_quality(const std::vector<double>& valid_values, int region_pixels);
     double estimate_ambient_light(const std::vector<uint16_t>& depth_map,
                                   int width, int height);
     EnvironmentType classify_environment(double light_level);

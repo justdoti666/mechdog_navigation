@@ -84,7 +84,7 @@
 ## 依赖项
 
 - **CMake** >= 3.16
-- **C++17** 编译器 (GCC 8+ / Clang 7+)
+- **C++20** 编译器 (GCC 10+ / Clang 12+ / MSVC 2022+)
 - **Orbbec Astra SDK**（可选，Astra Pro 真机模式，经 `-DUSE_ASTRA_SDK=ON -DASTRA_SDK_ROOT=<sdk根目录>` 启用）
 - **WiringPi**（可选，树莓派 GPIO 模式；注意原版已停止维护，建议使用社区 fork `github.com/WiringPi/WiringPi`）
 - **Linux i2c-dev**（可选，TSL2591 真机模式）

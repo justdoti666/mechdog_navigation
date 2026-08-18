@@ -41,6 +41,9 @@ struct FusedObstacle {
     double      astra_dist_m        = 8.0;
     std::string source;
     ObstacleLevel level            = ObstacleLevel::SAFE;
+    // A1: 方向级失效标记。某个方向传感器双侧失效 (Astra 无有效像素 + 超声无效) 时置 false,
+    // 该方向的 8.0m "假设无障碍" 兜底值不得参与方向决策 (否则会被当作最开阔盲区转向)。
+    bool        valid              = true;
 };
 
 /** 融合结果 */

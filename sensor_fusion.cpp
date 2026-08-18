@@ -10,6 +10,7 @@
 #include <sstream>
 #include <iomanip>
 #include <chrono>
+#include <limits>
 
 namespace mechdog {
 
@@ -49,12 +50,15 @@ FusionResult SensorFusion::fuse() {
     result.cliff_detected = ultrasonic_data.get_cliff_detected();
     result.obstacles["bottom"] = build_bottom_obstacle(bottom, result.cliff_detected);
 
-    // 6. 计算综合决策
-    result.min_forward_distance_m = std::min({
-        result.obstacles["left"].distance_m,
-        result.obstacles["center"].distance_m,
-        result.obstacles["right"].distance_m,
-    });
+    // 6. 计算综合决策 (A1: 只统计有效方向的距离; 全失效的 8.0m 兜底值不参与)
+    double min_forward = std::numeric_limits<double>::max();
+    for (const auto& dir : {"left", "center", "right"}) {
+        const auto& o = result.obstacles.at(dir);
+        if (!o.valid) continue;             // A1: 排除双侧失效的盲区方向
+        min_forward = std::min(min_forward, o.distance_m);
+    }
+    result.min_forward_distance_m = (min_forward == std::numeric_limits<double>::max())
+        ? 8.0 : min_forward;
 
     // 7. 紧急避障检查
     double min_ultrasonic_cm = ultrasonic_data.get_min_forward_distance_cm();
@@ -159,6 +163,10 @@ FusedObstacle SensorFusion::fuse_direction(
     // 距离分层融合
     auto [fused_dist, source] = layer_fusion(
         ultra_dist_m, astra_dist_m, astra_valid, astra_w, ultra_w);
+
+    // A1: 方向级失效标记 —— 双侧均无有效数据时, fused_dist 是 8.0m "假设无障碍" 兜底值,
+    // 绝非真实距离。标记 valid=false, 该方向不得参与方向决策 (否则盲区被当最开阔)。
+    obs.valid = astra_valid || (ultra_reading && ultra_reading->valid);
 
     // 计算置信度
     double confidence = calc_confidence(ultra_dist_m, astra_dist_m, astra_valid);
@@ -354,26 +362,45 @@ NavigationAction SensorFusion::choose_direction(
     const std::unordered_map<std::string, FusedObstacle>& obstacles) {
     // M6: 直接使用当前帧障碍数据 (由 fuse() 传入), 不再读 last_fusion_ ——
     // 旧实现读上一帧, 方向决策滞后一帧 (8Hz 下 ~125ms)
+    // A1: 忽略双侧失效 (valid=false) 的盲区方向, 否则 8.0m 兜底值会被当作最开阔转向。
 
     double left_dist = 8.0, center_dist = 8.0, right_dist = 8.0;
+    bool  left_ok = false, center_ok = false, right_ok = false;
     auto it = obstacles.find("left");
-    if (it != obstacles.end()) left_dist = it->second.distance_m;
+    if (it != obstacles.end() && it->second.valid) { left_dist = it->second.distance_m; left_ok = true; }
     it = obstacles.find("center");
-    if (it != obstacles.end()) center_dist = it->second.distance_m;
+    if (it != obstacles.end() && it->second.valid) { center_dist = it->second.distance_m; center_ok = true; }
     it = obstacles.find("right");
-    if (it != obstacles.end()) right_dist = it->second.distance_m;
+    if (it != obstacles.end() && it->second.valid) { right_dist = it->second.distance_m; right_ok = true; }
 
-    if (center_dist > EmergencyConfig::safe_dist_cm / 100.0) {
+    // A1: 所有前向方向均失效 -> 无可靠方向信息, 保守 (调用方 also 会因 sensors_valid=false STOP)
+    if (!left_ok && !center_ok && !right_ok) {
         return NavigationAction::SLOW_FORWARD;
     }
 
-    if (left_dist > right_dist && left_dist > EmergencyConfig::warning_dist_cm / 100.0) {
-        return NavigationAction::TURN_LEFT;
-    } else if (right_dist > EmergencyConfig::warning_dist_cm / 100.0) {
-        return NavigationAction::TURN_RIGHT;
-    } else {
+    // 中央有效且开阔 -> 缓行 (A1: 中央盲区时不得据此缓行)
+    if (center_ok && center_dist > EmergencyConfig::safe_dist_cm / 100.0) {
+        return NavigationAction::SLOW_FORWARD;
+    }
+
+    // 在有效方向中选择较开阔侧转向 (A1: 只比较有效方向, 退出优先)
+    if (left_ok && right_ok) {
+        if (left_dist > right_dist && left_dist > EmergencyConfig::warning_dist_cm / 100.0) {
+            return NavigationAction::TURN_LEFT;
+        }
+        if (right_dist > EmergencyConfig::warning_dist_cm / 100.0) {
+            return NavigationAction::TURN_RIGHT;
+        }
         return NavigationAction::BACKWARD;
     }
+    // 单侧有效: 仅依据该侧; 无效侧不参与抉择
+    if (left_ok && left_dist > EmergencyConfig::warning_dist_cm / 100.0) {
+        return NavigationAction::TURN_LEFT;
+    }
+    if (right_ok && right_dist > EmergencyConfig::warning_dist_cm / 100.0) {
+        return NavigationAction::TURN_RIGHT;
+    }
+    return NavigationAction::BACKWARD;
 }
 
 // M1: 全部传感器均无有效数据?
