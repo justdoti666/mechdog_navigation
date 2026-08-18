@@ -108,11 +108,15 @@ private:
     double calc_confidence(double ultra_m, double astra_m, bool astra_valid);
 
     ObstacleLevel classify_obstacle_level(double distance_m);
+    // R3: front_valid —— 前向 (left/center/right) 是否有任一有效方向。
+    // 旧判定把 bottom 计入有效性: 底部超声有效 + 前向全盲时 sensors_valid=true,
+    // min_forward=8.0 兜底 -> 直接 FORWARD (fail-open)。前向失明必须保守, bottom 无效力。
     NavigationAction determine_action(double min_forward_m,
                                        double min_ultrasonic_cm,
                                        bool cliff_detected,
                                        const std::unordered_map<std::string, FusedObstacle>& obstacles,
-                                       bool sensors_valid);
+                                       bool sensors_valid,
+                                       bool front_valid);
     NavigationAction choose_direction(
         const std::unordered_map<std::string, FusedObstacle>& obstacles);
 

@@ -57,8 +57,9 @@ FusionResult SensorFusion::fuse() {
         if (!o.valid) continue;             // A1: 排除双侧失效的盲区方向
         min_forward = std::min(min_forward, o.distance_m);
     }
-    result.min_forward_distance_m = (min_forward == std::numeric_limits<double>::max())
-        ? 8.0 : min_forward;
+    // R3: 前向是否有任一有效方向 (bottom 有效不计入 —— 前方失明必须保守)
+    const bool front_valid = (min_forward != std::numeric_limits<double>::max());
+    result.min_forward_distance_m = front_valid ? min_forward : 8.0;
 
     // 7. 紧急避障检查
     double min_ultrasonic_cm = ultrasonic_data.get_min_forward_distance_cm();
@@ -66,7 +67,7 @@ FusionResult SensorFusion::fuse() {
     result.sensors_valid = !all_sensors_invalid(astra_frame, ultrasonic_data);
     result.recommended_action = determine_action(
         result.min_forward_distance_m, min_ultrasonic_cm, result.cliff_detected,
-        result.obstacles, result.sensors_valid);
+        result.obstacles, result.sensors_valid, front_valid);
 
     return result;
 }
@@ -278,6 +279,9 @@ FusedObstacle SensorFusion::build_bottom_obstacle(
     // 写进融合结果; 无效时兜底 0.0 (不参与 min_forward, 可视化 d<=0 跳过)
     obs.distance_m = bottom.valid ? bottom.distance_cm * kCmToM : 0.0;
     obs.confidence = bottom.valid ? 1.0 : 0.0;
+    // R4: 无效读数同步置 valid=false (与 distance_m/confidence 兜底口径一致,
+    // 避免输出字段误导 —— bottom 的 0.0 是"无数据"而非"贴地距离 0")
+    obs.valid = bottom.valid;
     // Low 清理: 无效读数不再存 -1.0 (与 distance_m 兜底口径一致, 避免字段含噪声)
     obs.ultrasonic_dist_cm = bottom.valid ? bottom.distance_cm : 0.0;
     obs.astra_dist_m = 8.0;
@@ -323,7 +327,7 @@ ObstacleLevel SensorFusion::classify_obstacle_level(double distance_m) {
 NavigationAction SensorFusion::determine_action(
     double min_forward_m, double min_ultrasonic_cm, bool cliff_detected,
     const std::unordered_map<std::string, FusedObstacle>& obstacles,
-    bool sensors_valid) {
+    bool sensors_valid, bool front_valid) {
 
     // M1 fail-closed: 全部传感器均无有效数据时, 兜底值 (8.0m/400cm) 不可信,
     // 不得"假设无障碍"继续前进 —— 停车等待数据恢复 (上游闸门超时另有兜底)
@@ -331,9 +335,16 @@ NavigationAction SensorFusion::determine_action(
         return NavigationAction::STOP;
     }
 
-    // 最高优先级：悬崖检测
+    // 最高优先级：悬崖检测 (必须先于 R3, 避免前向全盲时掩盖悬崖紧急刹车)
     if (cliff_detected) {
         return NavigationAction::STOP;
+    }
+
+    // R3: 前向 (left/center/right) 全部失效时, min_forward=8.0 兜底不可作"开阔"依据 ——
+    // 机器人前方完全失明 (镜头被挡 + 三颗前向超声全坏), 即使 bottom 有效也不得
+    // FORWARD (此前判定把 bottom 计入有效性导致 fail-open)。降速保守行驶。
+    if (!front_valid) {
+        return NavigationAction::SLOW_FORWARD;
     }
 
     // 超声波独立紧急检查
