@@ -1,0 +1,34 @@
+# ROS-7 (v2.2): 构建产物与 IDE 文件忽略
+# 构建目录
+build*/
+build_real/
+build_v22/
+
+# 编译产物
+*.obj
+*.o
+*.a
+*.so
+*.exe
+*.pdb
+
+# CMake 中间
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+install_manifest.txt
+*.vcxproj*
+*.slnx
+
+# IDE
+.vs/
+.vscode/
+.cache/
+
+# Python (脚本/launch 缓存)
+__pycache__/
+*.pyc
+
+# Astra 日志/临时
+astra.log

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 多传感器数据融合模块 (C++ 版)
  * 融合 Astra Pro 深度相机 + HC-SR04 超声波传感器阵列 + TSL2591 环境红外
  */
@@ -86,6 +86,8 @@ private:
     static constexpr double kCmToM = 0.01;
 
     EnvironmentType determine_environment(const AstraFrame& frame);
+    // ALG-3 (v2.2): 归一化光强 -> 环境档位 (IR 与深度代理同源阈值, 见 EnvironmentThresholds)
+    static EnvironmentType light_to_env(double light);
     std::pair<double, double> get_adaptive_weights(EnvironmentType env_type,
                                                     const AstraFrame& frame);
     std::string env_to_key(EnvironmentType env_type) const;

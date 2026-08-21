@@ -63,13 +63,21 @@ void AstraProDriver::stop() {
 }
 
 void AstraProDriver::capture_loop() {
+    // ALG-7 (v2.2): 按本帧实际耗时补偿 sleep, 替代固定 33ms 双重节流
+    // (capture_real 内 10×5ms 轮询已耗时; 固定 33ms 叠加会让真机跌破 30fps)
+    const auto frame_period = std::chrono::milliseconds(1000 / DEPTH_FPS);  // ~33ms @30fps
     while (running_) {
+        auto t0 = std::chrono::steady_clock::now();
         auto frame = capture_frame();
+        frame.frame_seq = ++frame_seq_counter_;  // ALG-8: 写帧序号 (real/sim 统一在此)
         {
             std::lock_guard<std::mutex> guard(lock_);
             latest_frame_ = std::move(frame);
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000 / DEPTH_FPS));
+        auto elapsed = std::chrono::steady_clock::now() - t0;
+        if (elapsed < frame_period) {
+            std::this_thread::sleep_for(frame_period - elapsed);
+        }
     }
 }
 
@@ -250,11 +258,11 @@ AstraFrame AstraProDriver::capture_real() {
     frame.right_region  = analyze_region(frame.depth_map, frame.depth_width,
                                          frame.depth_height, "right");
 
-    // 环境判定: 深度图无效像素比例代理
-    frame.ambient_light_level = estimate_ambient_light(frame.depth_map,
-                                                       frame.depth_width,
-                                                       frame.depth_height);
-    frame.environment = classify_environment(frame.ambient_light_level);
+    // 环境判定: 深度图无效像素比例代理 (ALG-3 v2.2: ambient_light_level 改局部变量, 不再存帧字段)
+    double ambient_light = estimate_ambient_light(frame.depth_map,
+                                                  frame.depth_width,
+                                                  frame.depth_height);
+    frame.environment = classify_environment(ambient_light);
 
     // 彩色帧缓存补充距离信息 (从深度帧中央区域算)
     {
@@ -324,8 +332,8 @@ AstraFrame AstraProDriver::simulate_frame() {
 
     // 环境: 置 UNKNOWN, 让 determine_environment() 走红外模拟值 fallback,
     // 使室内/半室内/室外三档在模拟中均可验证 (FIX-2)
+    // (ALG-3 v2.2: 已删除 ambient_light_level 字段, 此处不再写死值)
     frame.environment = EnvironmentType::UNKNOWN;
-    frame.ambient_light_level = 0.1;
 
     // 区域分析
     frame.center_region = analyze_region(frame.depth_map, DEPTH_WIDTH, DEPTH_HEIGHT, "center");
@@ -410,8 +418,9 @@ double AstraProDriver::estimate_ambient_light(const std::vector<uint16_t>& depth
 }
 
 EnvironmentType AstraProDriver::classify_environment(double light_level) {
-    if (light_level < 0.3) return EnvironmentType::INDOOR;
-    if (light_level < 0.7) return EnvironmentType::SEMI_INDOOR;
+    // ALG-3 (v2.2): 阈值改用 EnvironmentThresholds, 与 IR 路径 (light_to_env) 同源, 消除双轨
+    if (light_level < EnvironmentThresholds::indoor_max)  return EnvironmentType::INDOOR;
+    if (light_level < EnvironmentThresholds::outdoor_min) return EnvironmentType::SEMI_INDOOR;
     return EnvironmentType::OUTDOOR;
 }
 

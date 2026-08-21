@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 多传感器数据融合模块实现
  */
 
@@ -46,8 +46,10 @@ FusionResult SensorFusion::fuse() {
     }
 
     // 5. 底部悬崖检测（仅超声波）
+    // ALG-1 (v2.2): 改用 is_fall_risk() —— 独立 20Hz bottom 线程的 fail-closed 判定,
+    // 不再依赖同周期 read_all 的 bottom (后者现仅为缓存值, 供 build_bottom_obstacle 用)
     const auto& bottom = ultrasonic_data.bottom;
-    result.cliff_detected = ultrasonic_data.get_cliff_detected();
+    result.cliff_detected = ultrasonic_->is_fall_risk();
     result.obstacles["bottom"] = build_bottom_obstacle(bottom, result.cliff_detected);
 
     // 6. 计算综合决策 (A1: 只统计有效方向的距离; 全失效的 8.0m 兜底值不参与)
@@ -73,34 +75,33 @@ FusionResult SensorFusion::fuse() {
 }
 
 // ========== 环境判断 ==========
+// ALG-3 + ALG-4 (v2.2): 统一为单一清晰链路, 消除 IR-first 误导死分支 + 阈值双轨 + 真机随机污染。
+// 优先级: 真实 IR (可选增强, TSL2591 已取消) -> 深度图代理 (默认) -> 模拟 IR (FIX-2 三档覆盖) -> 室外(安全侧)
 EnvironmentType SensorFusion::determine_environment(const AstraFrame& frame) {
-    // 修复(F3): 环境判定改用 TSL2591 实测红外强度(设计意图), 而非深度图无效像素比估算
-    if (ir_ && !ir_->is_simulated()) {
+    // 1. 真实 IR 可选增强 (TSL2591 已取消, 未来接入时启用; 真机失败时 is_real_available()=false 跳过)
+    if (ir_ && ir_->is_real_available()) {
         double light = ir_->read_normalized_light();  // 0.0~1.0; -1.0 = 读取失败
-        if (light < 0) {
-            // 修复D3: 红外传感器故障时回退室外(超声波主导), 安全侧
-            return EnvironmentType::OUTDOOR;
-        }
-        if (light <= IrConfig::ir_indoor_max)  return EnvironmentType::INDOOR;
-        if (light >= IrConfig::ir_outdoor_min) return EnvironmentType::OUTDOOR;
-        return EnvironmentType::SEMI_INDOOR;
+        if (light < 0) return EnvironmentType::OUTDOOR;  // IR 故障 -> 安全侧 (D3)
+        return light_to_env(light);
     }
-    // 红外不可用(模拟/无传感器)时回退: 帧有效用深度图估算, 无效视为室外(超声波主导, 安全侧)
-    if (!frame.valid || frame.environment == EnvironmentType::UNKNOWN) {
-        // 帧未就绪或环境未初始化 (如采集线程启动初帧): 若红外是模拟的,
-        // 用其随机值保证环境可判定 (保持 test_fusion 对"红外模拟值全覆盖三环境"的语义);
-        // 若红外真机失败, 回退室外(安全侧)
-        if (ir_) {
-            double light = ir_->read_normalized_light();
-            if (light >= 0) {
-                if (light <= IrConfig::ir_indoor_max)  return EnvironmentType::INDOOR;
-                if (light >= IrConfig::ir_outdoor_min) return EnvironmentType::OUTDOOR;
-                return EnvironmentType::SEMI_INDOOR;
-            }
-        }
-        return EnvironmentType::OUTDOOR;
+    // 2. 真机默认: 深度图代理 (capture_real 已算好 frame.environment)
+    if (frame.valid && frame.environment != EnvironmentType::UNKNOWN)
+        return frame.environment;
+    // 3. 模拟模式 (frame.environment=UNKNOWN): 用模拟 IR 覆盖三档 (FIX-2 语义, 测试依赖)
+    //    注: 真机 IR 失败时 is_real_available()=false 且 is_simulated()=false -> 跳过本分支 -> 走室外
+    if (ir_ && ir_->is_simulated()) {
+        double light = ir_->read_normalized_light();
+        if (light >= 0) return light_to_env(light);
     }
-    return frame.environment;
+    // 4. 帧无效 + 无可用 IR -> 室外 (安全侧, 超声波主导)
+    return EnvironmentType::OUTDOOR;
+}
+
+// ALG-3 (v2.2): 归一化光强 -> 环境档位 (IR 与深度代理 classify_environment 同源阈值)
+EnvironmentType SensorFusion::light_to_env(double light) {
+    if (light < EnvironmentThresholds::indoor_max)  return EnvironmentType::INDOOR;
+    if (light < EnvironmentThresholds::outdoor_min) return EnvironmentType::SEMI_INDOOR;
+    return EnvironmentType::OUTDOOR;
 }
 
 std::pair<double, double> SensorFusion::get_adaptive_weights(
@@ -141,7 +142,7 @@ FusedObstacle SensorFusion::fuse_direction(
     // 获取超声波读数 (修复D1: 必须检查 valid —— 真机超时返回 -1.0, 不查 valid 会被 L0 误判为超近距离障碍)
     const auto* ultra_reading = get_ultrasonic_reading(ultra_data, direction);
     double ultra_dist_m = (ultra_reading && ultra_reading->valid)
-        ? ultra_reading->distance_cm * kCmToM : 4.5;
+        ? ultra_reading->distance_cm * kCmToM : UltrasonicConfig::kUltrasonicInvalidM;
 
     // 获取 Astra 读数
     double astra_dist_m = 8.0;
@@ -207,8 +208,8 @@ std::pair<double, std::string> SensorFusion::layer_fusion(
         return {ultra_m, oss.str()};
     }
 
-    // 有效区间: [0.02m(2cm), 4.5m)
-    bool ultra_valid = (ultra_m >= 0.02) && (ultra_m < 4.5);
+    // 有效区间: [0.02m(2cm), kUltrasonicInvalidM)
+    bool ultra_valid = (ultra_m >= 0.02) && (ultra_m < UltrasonicConfig::kUltrasonicInvalidM);
 
     if (!astra_valid) {
         if (ultra_valid) {
@@ -293,8 +294,8 @@ FusedObstacle SensorFusion::build_bottom_obstacle(
 // ========== 置信度计算 ==========
 double SensorFusion::calc_confidence(
     double ultra_m, double astra_m, bool astra_valid) {
-    // 修复D2: 超声有效区间统一为 [0.02m, 4.5m)
-    const bool ultra_valid = (ultra_m >= 0.02) && (ultra_m < 4.5);
+    // 修复D2: 超声有效区间统一为 [0.02m, kUltrasonicInvalidM)
+    const bool ultra_valid = (ultra_m >= 0.02) && (ultra_m < UltrasonicConfig::kUltrasonicInvalidM);
 
     if (!astra_valid) {
         if (ultra_valid) {

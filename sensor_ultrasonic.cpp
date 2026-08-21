@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 超声波传感器驱动模块实现 (HC-SR04)
  */
 #include "sensor_ultrasonic.h"
@@ -174,12 +174,61 @@ UltrasonicArrayDriver::UltrasonicArrayDriver(
             name, cfg.trig_pin, cfg.echo_pin,
             cfg.yaw_offset_deg, cfg.pitch_offset_deg);
     }
+    // ALG-1 (v2.2): 底部独立高频通路 (F9)。取出 bottom 裸指针, 启动 20Hz 线程。
+    // bottom_sensor_ 生命周期随 sensors_ (unique_ptr), 析构时先 stop_bottom() 再释放 sensors_。
+    auto it = sensors_.find("bottom");
+    if (it != sensors_.end()) {
+        bottom_sensor_ = it->second.get();
+        bottom_running_ = true;
+        bottom_thread_ = std::thread(&UltrasonicArrayDriver::bottom_loop, this);
+    }
+}
+
+UltrasonicArrayDriver::~UltrasonicArrayDriver() {
+    stop_bottom();  // 先停线程, 再由成员析构释放 sensors_ (避免线程访问已释放对象)
+}
+
+// ALG-1 (v2.2): 底部独立 20Hz 刷新线程 (F9)。与 read_all 完全分开, 独立锁, 不参与前向串扰时序。
+// measure() 内 50ms MIN_INTERVAL_SEC 门控在 50ms 周期下不触发额外 sleep (elapsed ≈ 50ms, 不 < 50ms)。
+void UltrasonicArrayDriver::bottom_loop() {
+    while (bottom_running_.load()) {
+        UltrasonicReading r = bottom_sensor_->measure();
+        {
+            std::lock_guard<std::mutex> lk(bottom_mutex_);
+            bottom_latest_ = r;
+            bottom_have_ = true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));  // 20Hz
+    }
+}
+
+// ALG-1 (v2.2): fail-closed 跌落风险判定, 沿用 F4 get_cliff_detected 语义:
+// 无数据 / 无效读数 / 距离 > 阈值 一律判有风险 (宁可误判不漏判)。
+bool UltrasonicArrayDriver::is_fall_risk() const {
+    if (!bottom_have_.load()) return true;  // 线程未就绪 (启动初/无 bottom 传感器) -> 有风险
+    std::lock_guard<std::mutex> lk(bottom_mutex_);
+    const auto& b = bottom_latest_;
+    return !b.valid || b.distance_cm > UltrasonicConfig::cliff_threshold_cm;
+}
+
+UltrasonicReading UltrasonicArrayDriver::get_bottom_reading() const {
+    if (!bottom_have_.load()) return UltrasonicReading{};  // 未就绪 -> valid=false 默认读数
+    std::lock_guard<std::mutex> lk(bottom_mutex_);
+    return bottom_latest_;
+}
+
+void UltrasonicArrayDriver::stop_bottom() {
+    bottom_running_ = false;
+    if (bottom_thread_.joinable()) bottom_thread_.join();
 }
 
 UltrasonicArrayData UltrasonicArrayDriver::read_all() {
     UltrasonicArrayData data;
     data.timestamp = std::chrono::duration<double>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+
+    // ALG-1 (v2.2): 底部读数从独立线程缓存取 (不再在本轮触发新测量), 与前向解耦
+    data.bottom = get_bottom_reading();
 
     // 默认读数（传感器不存在时使用）
     UltrasonicReading default_reading;
@@ -189,9 +238,9 @@ UltrasonicArrayData UltrasonicArrayDriver::read_all() {
     // 互斥锁防止外部并发调用
     std::lock_guard<std::mutex> lock(read_mutex_);
 
-    // 分时轮询：固定顺序依次触发，每颗间隔 30ms 避免串扰
+    // 分时轮询前向 3 颗：固定顺序依次触发，每颗间隔 30ms 避免串扰
     // 原因：HC-SR04 最大回波时间 ~25ms，间隔 ≥30ms 确保前一颗回波完全衰减
-    // 4 颗完整一轮 ~120ms → 更新率约 8Hz，步行速度足够
+    // 3 颗完整一轮 ~60ms → 更新率约 16Hz (底部已独立 20Hz, 见 is_fall_risk)
     static constexpr double CROSSTALK_GAP_MS = 30.0;
 
     auto read_sensor = [&](const std::string& key) -> UltrasonicReading {
@@ -199,10 +248,6 @@ UltrasonicArrayData UltrasonicArrayDriver::read_all() {
         if (it == sensors_.end()) return default_reading;
         return it->second->measure();
     };
-
-    // 底部传感器先读（结果不受声波串扰影响，方向不同）
-    data.bottom       = read_sensor("bottom");
-    std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(CROSSTALK_GAP_MS));
 
     // 前向三颗依次轮询
     data.front_center = read_sensor("front_center");
@@ -217,6 +262,7 @@ UltrasonicArrayData UltrasonicArrayDriver::read_all() {
 }
 
 void UltrasonicArrayDriver::cleanup() {
+    stop_bottom();  // 先停 bottom 线程
     for (auto& kv : sensors_) {
         auto& sensor = kv.second;
         sensor->cleanup();

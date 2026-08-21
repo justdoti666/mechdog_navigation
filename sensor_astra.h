@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Astra Pro 深度相机驱动模块 (C++ 版)
  * 基于奥比中光 Astra Pro (单目结构光)
  * 通过 Astra SDK (astra:: API) 获取深度图 (真机模式) / 模拟生成 (模拟模式)
@@ -45,9 +45,13 @@ struct DepthRegion {
 /** Astra Pro 单帧数据 */
 struct AstraFrame {
     double        timestamp        = 0.0;
-    bool          valid            = true;
+    // ALG-8 (v2.2): 默认 valid=false (fail-closed; 原默认 true 是语义陷阱, 空帧被误判有效)
+    bool          valid            = false;
+    // ALG-8 (v2.2): 帧序号, 供消费者判新鲜度/丢帧 (capture_real/simulate 递增)
+    uint64_t      frame_seq        = 0;
     EnvironmentType environment     = EnvironmentType::UNKNOWN;
-    double        ambient_light_level = 0.0;
+    // ALG-3 (v2.2): 删除 ambient_light_level 字段 —— 无外部消费方 (fusion 只读 environment),
+    // 仅 capture_real 内作瞬态局部派生 environment; 现改为局部变量 (见 sensor_astra.cpp)
 
     DepthRegion   center_region;
     DepthRegion   left_region;
@@ -112,6 +116,8 @@ private:
     AstraFrame latest_frame_;
     std::unique_ptr<std::thread> capture_thread_;
     std::mt19937 rng_;
+    // ALG-8 (v2.2): 帧序号计数 (capture_loop 递增, 写入 AstraFrame::frame_seq)
+    std::atomic<uint64_t> frame_seq_counter_{0};
 
     void capture_loop();
     AstraFrame simulate_frame();

@@ -52,8 +52,19 @@ public:
     /** 是否处于模拟模式 (真机时环境判定应跳过红外, 避免模拟随机值污染) */
     bool is_simulated() const { return use_simulated_; }
 
+    // ALG-4 (v2.2): 真实硬件是否可用 —— 非模拟 且 未发生硬件初始化失败。
+    // 区别于 is_simulated(): 真机 TSL2591 初始化失败时置 hw_unavailable_=true
+    // (不再静默回退模拟), 使 read_normalized_light() 返回 -1 走深度代理/室外,
+    // 而非返回模拟随机值污染环境判定。
+    bool is_real_available() const { return !use_simulated_ && !hw_unavailable_; }
+
 private:
+    // 单元测试访问 (tests/test_fusion.cpp 专用, 注入 hw_unavailable_ 状态做回归)
+    friend class InfraRedTestAccess;
+
     bool use_simulated_;
+    // ALG-4: 真机硬件初始化失败标志 (仅 Linux 真机模式可置 true; 模拟模式恒 false)
+    bool hw_unavailable_ = false;
 
     // 模拟模式 RNG
     std::mt19937 rng_;

@@ -6,7 +6,25 @@
 namespace mechdog {
 
 VelocityCmd PathPlanner::plan(const FusionResult& fusion) {
-    return action_to_cmd(fusion.recommended_action);
+    VelocityCmd target = action_to_cmd(fusion.recommended_action);
+    // ALG-6 (v2.2): 速度 ramp —— 用闲置的 linear_accel/angular_accel 一阶限幅,
+    // 消除 FORWARD→STOP→BACKWARD 瞬时跳变。safety_node timer 5Hz, dt=0.2s。
+    constexpr double dt = 0.2;
+    const double max_dv = PlannerConfig::linear_accel  * dt;  // 0.3*0.2 = 0.06 m/s 每步
+    const double max_dw = PlannerConfig::angular_accel * dt;  // 0.5*0.2 = 0.10 rad/s 每步
+    target.linear  = clamp_step(target.linear,  last_linear_,  max_dv);
+    target.angular = clamp_step(target.angular, last_angular_, max_dw);
+    last_linear_  = target.linear;
+    last_angular_ = target.angular;
+    return target;
+}
+
+// ALG-6 (v2.2): 单步限幅 —— 把 target 朝 last 限制在 ±max_delta 内
+double PathPlanner::clamp_step(double target, double last, double max_delta) {
+    double diff = target - last;
+    if (diff >  max_delta) return last + max_delta;
+    if (diff < -max_delta) return last - max_delta;
+    return target;
 }
 
 VelocityCmd PathPlanner::action_to_cmd(NavigationAction action) const {

@@ -142,6 +142,18 @@ public:
                                     const UltrasonicArrayData& ultra) {
         return f.all_sensors_invalid(frame, ultra);
     }
+    // ALG-3 (v2.2): 暴露 determine_environment 验证单一链路 (真实 IR/深度代理/模拟 IR/室外)
+    static EnvironmentType determine_environment(SensorFusion& f, const AstraFrame& frame) {
+        return f.determine_environment(frame);
+    }
+};
+
+// ALG-4 (v2.2): 测试访问器 —— 注入 hw_unavailable_/use_simulated_ 状态做回归
+// (InfraRedSensor 声明了 friend InfraRedTestAccess)
+class InfraRedTestAccess {
+public:
+    static void set_hw_unavailable(InfraRedSensor& ir, bool v) { ir.hw_unavailable_ = v; }
+    static void set_use_simulated(InfraRedSensor& ir, bool v) { ir.use_simulated_ = v; }
 };
 } // namespace mechdog
 
@@ -546,6 +558,84 @@ static void test_bottom_invalid_sets_valid_false() {
     CHECK(obs_ok.distance_m == 0.15);
 }
 
+// ALG-1 (v2.2): 底部独立通路 fail-closed + 逻辑自洽
+static void test_is_fall_risk_fail_closed() {
+    // 1) layout 不含 "bottom": bottom_sensor_=nullptr, bottom_have_ 恒 false -> 必须判有风险
+    auto no_bottom = get_ultrasonic_layout();
+    no_bottom.erase("bottom");
+    {
+        UltrasonicArrayDriver driver(no_bottom);
+        CHECK(driver.is_fall_risk() == true);   // 无 bottom 传感器 -> fail-closed
+        UltrasonicReading br = driver.get_bottom_reading();
+        CHECK(br.valid == false);               // 未就绪 -> 默认无效读数
+    }
+
+    // 2) 完整 layout: bottom 线程 20Hz 刷新, is_fall_risk 与 get_bottom_reading 自洽
+    AstraProDriver astra(true);
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    InfraRedSensor ir(true);
+    SensorFusion fusion(&astra, &ultrasonic, &ir);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));  // 等 bottom 首读
+    UltrasonicReading br = ultrasonic.get_bottom_reading();
+    CHECK(br.valid == true);  // sim 底部读数恒 valid (12-28cm 或 200-350cm 均在 2-400 量程)
+    // is_fall_risk 必须与缓存读数同源 (F4 fail-closed 公式)
+    bool expected = !br.valid || br.distance_cm > UltrasonicConfig::cliff_threshold_cm;
+    CHECK(ultrasonic.is_fall_risk() == expected);
+}
+
+// ALG-4 (v2.2): 真机硬件失败 (hw_unavailable_) 不返回随机值, 走 -1 故障值
+static void test_hw_unavailable_no_random() {
+    InfraRedSensor ir(true);  // 构造为模拟
+    // 注入"真机 TSL2591 初始化失败"状态: 非模拟 + 硬件不可用
+    InfraRedTestAccess::set_use_simulated(ir, false);
+    InfraRedTestAccess::set_hw_unavailable(ir, true);
+    CHECK(ir.is_simulated() == false);
+    CHECK(ir.is_real_available() == false);     // 真机失败 -> 不可用
+    double v = ir.read_normalized_light();
+    CHECK(v == -1.0);                           // 不返回随机, 返回故障值
+
+    // 对照: 模拟模式保留随机语义 (FIX-2, 不被本修复破坏)
+    InfraRedSensor ir2(true);
+    double s = ir2.read_normalized_light();
+    CHECK(s >= 0.0 && s <= 1.0);                 // 模拟 -> [0,1] 随机
+    CHECK(ir2.is_simulated() == true);
+    CHECK(ir2.is_real_available() == false);    // 模拟即非真机可用
+}
+
+// ALG-3 (v2.2): determine_environment 单一链路 —— 真机 IR 失败时走深度代理, 不消费随机
+static void test_determine_environment_depth_proxy_default() {
+    AstraProDriver astra(true);
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    InfraRedSensor ir(true);
+    SensorFusion fusion(&astra, &ultrasonic, &ir);
+
+    // 注入真机 IR 失败 (use_simulated=false, hw_unavailable=true)
+    InfraRedTestAccess::set_use_simulated(ir, false);
+    InfraRedTestAccess::set_hw_unavailable(ir, true);
+    CHECK(ir.is_real_available() == false);
+
+    // 帧有效 + environment 已由深度代理算好 -> 直接用, 不读随机 IR
+    AstraFrame frame; frame.valid = true;
+    frame.environment = EnvironmentType::INDOOR;
+    CHECK(SensorFusionTestAccess::determine_environment(fusion, frame) == EnvironmentType::INDOOR);
+    frame.environment = EnvironmentType::OUTDOOR;
+    CHECK(SensorFusionTestAccess::determine_environment(fusion, frame) == EnvironmentType::OUTDOOR);
+
+    // 帧无效 + 真机 IR 失败 (非模拟) -> 室外 (安全侧), 不消费随机
+    AstraFrame bad_frame; bad_frame.valid = false;
+    bad_frame.environment = EnvironmentType::UNKNOWN;
+    CHECK(SensorFusionTestAccess::determine_environment(fusion, bad_frame) == EnvironmentType::OUTDOOR);
+
+    // 对照: 模拟 IR (use_simulated=true) + UNKNOWN 帧 -> 消费模拟随机值覆盖三档 (FIX-2 保留)
+    InfraRedTestAccess::set_use_simulated(ir, true);
+    InfraRedTestAccess::set_hw_unavailable(ir, false);
+    AstraFrame sim_frame; sim_frame.valid = true;
+    sim_frame.environment = EnvironmentType::UNKNOWN;
+    EnvironmentType e = SensorFusionTestAccess::determine_environment(fusion, sim_frame);
+    CHECK(e == EnvironmentType::INDOOR || e == EnvironmentType::SEMI_INDOOR ||
+          e == EnvironmentType::OUTDOOR);
+}
+
 int main() {
     test_cliff_valid_check();
     test_min_forward_valid_filter();
@@ -561,6 +651,9 @@ int main() {
     test_all_invalid_fail_closed();
     test_front_blind_with_bottom_valid_is_conservative();
     test_bottom_invalid_sets_valid_false();
+    test_is_fall_risk_fail_closed();           // ALG-1
+    test_hw_unavailable_no_random();           // ALG-4
+    test_determine_environment_depth_proxy_default();  // ALG-3
 
     std::cout << "passed=" << g_passed << " failed=" << g_failed << std::endl;
     return g_failed == 0 ? 0 : 1;

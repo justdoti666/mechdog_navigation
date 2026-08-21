@@ -50,8 +50,12 @@ InfraRedSensor::InfraRedSensor(bool use_simulated)
                       << std::hex << static_cast<int>(I2C_ADDR) << std::dec << ")"
                       << std::endl;
         } else {
-            std::cerr << "[IR] TSL2591 初始化失败, 回退模拟模式" << std::endl;
-            use_simulated_ = true;
+            // ALG-4 (v2.2): 不再静默回退模拟模式 (那样 read 会返回随机值污染环境判定,
+            // 见 sensor_fusion.cpp determine_environment 的 Astra 无效分支)。
+            // 改置 hw_unavailable_=true, read_normalized_light 返回 -1 -> 融合走深度代理/室外。
+            std::cerr << "[IR] TSL2591 初始化失败, 标记 hw_unavailable (真机路径将返回 -1, 融合回退深度代理)"
+                      << std::endl;
+            hw_unavailable_ = true;
         }
     }
 #else
@@ -67,8 +71,14 @@ InfraRedSensor::~InfraRedSensor() {
 }
 
 double InfraRedSensor::read_normalized_light() {
+    // 有意模拟 (sim 模式 / PC): 保留随机语义 (FIX-2 三档覆盖 + test_layer_fusion_boundaries 依赖)
     if (use_simulated_) {
         return simulate_ir();
+    }
+    // ALG-4 (v2.2): 真机硬件初始化失败 -> 返回故障值, 不返回随机值
+    // (避免 fusion 的 Astra 无效分支消费随机 IR 污染环境判定)
+    if (hw_unavailable_) {
+        return -1.0;
     }
 #ifdef __linux__
     // 修复D3: 读取失败返回 -1.0, 调用方应回退到安全侧(室外/超声波主导),
@@ -78,7 +88,8 @@ double InfraRedSensor::read_normalized_light() {
     double norm = raw / static_cast<double>(IR_MAX_REF);
     return std::clamp(norm, 0.0, 1.0);
 #else
-    return simulate_ir();
+    // 非 Linux 且非模拟: 构造已强制 use_simulated_=true, 走不到此分支; 防御返回故障值
+    return -1.0;
 #endif
 }
 

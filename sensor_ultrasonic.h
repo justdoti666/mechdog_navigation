@@ -1,10 +1,11 @@
-﻿/**
+/**
  * 超声波传感器驱动模块 (HC-SR04)
  * 4颗传感器阵列, 通过 GPIO (Trig/Echo) 接口
  */
 #pragma once
 
 #include "config.h"
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -78,8 +79,18 @@ private:
 class UltrasonicArrayDriver {
 public:
     explicit UltrasonicArrayDriver(const std::unordered_map<std::string, UltrasonicSensorEntry>& layout);
+    // ALG-1 (v2.2): 析构 join bottom 线程 (F9 落地: 底部独立高频通路)
+    ~UltrasonicArrayDriver();
 
-    /** 分时轮询读取所有4颗传感器 (串行, 间隔 30ms 防串扰, 一轮 ~120ms / 8Hz) */
+    // ALG-1 (v2.2): 底部跌落风险独立判定 (fail-closed, 沿用 F4 get_cliff_detected 语义)。
+    // 由独立 bottom_loop @20Hz 线程刷新, 不再依赖 read_all 同周期; 无数据/无效读数均判有风险。
+    bool is_fall_risk() const;
+
+    // ALG-1 (v2.2): 取底部最新读数 (供 build_bottom_obstacle 等消费方; 未就绪返回 valid=false)
+    UltrasonicReading get_bottom_reading() const;
+
+    /** 分时轮询读取前向 3 颗传感器 (串行, 间隔 30ms 防串扰, 一轮 ~60ms / 16Hz);
+     *  底部已移至独立 20Hz 线程 (is_fall_risk), data.bottom 由 get_bottom_reading 缓存填充 */
     UltrasonicArrayData read_all();
 
     /** 清理所有传感器资源 */
@@ -88,6 +99,17 @@ public:
 private:
     std::unordered_map<std::string, std::unique_ptr<UltrasonicSensor>> sensors_;
     std::mutex read_mutex_;
+
+    // ---- ALG-1 (v2.2): 底部独立高频通路 (F9) ----
+    UltrasonicSensor* bottom_sensor_ = nullptr;   // 指向 sensors_["bottom"] (构造时取出, 生命周期随 sensors_)
+    std::thread bottom_thread_;
+    std::atomic<bool> bottom_running_{false};
+    mutable std::mutex bottom_mutex_;              // mutable: const 访问器 is_fall_risk/get_bottom_reading 加锁
+    UltrasonicReading bottom_latest_{};
+    std::atomic<bool> bottom_have_{false};
+
+    void bottom_loop();                            // 20Hz 独立刷新底部读数
+    void stop_bottom();                            // 置位 + join (析构/cleanup 调用)
 };
 
 } // namespace mechdog

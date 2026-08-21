@@ -29,6 +29,13 @@ public:
 private:
     // 反应式映射: NavigationAction -> (linear, angular)
     VelocityCmd action_to_cmd(NavigationAction action) const;
+
+    // ALG-6 (v2.2): 速度 ramp —— 用闲置的 linear_accel/angular_accel 一阶限幅,
+    // 消除 FORWARD→STOP→BACKWARD 瞬时跳变。step 限幅: |target-last| <= accel*dt。
+    static double clamp_step(double target, double last, double max_delta);
+
+    double last_linear_  = 0.0;  // 上一帧输出 (ramp 状态)
+    double last_angular_ = 0.0;
 };
 
 } // namespace mechdog

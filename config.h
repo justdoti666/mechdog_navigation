@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 机械狗寻路系统 - 全局配置 (C++ 版)
  * 基于 Astra Pro 深度相机 + HC-SR04 超声波传感器融合
  */
@@ -49,6 +49,9 @@ struct UltrasonicConfig {
     static constexpr double  timeout_sec        = 0.025;   // 超时 ~4m
     static constexpr double  min_interval_sec   = 0.05;    // 最小测量间隔 50ms
     static constexpr double  cliff_threshold_cm = 30.0;    // 底部悬崖判定阈值 (安装高度相关, 标定见 docs/IR_CALIBRATION.md 同类流程)
+    // ALG-5 (v2.2): 超声失效哨兵常量。原代码散落 4.5 魔法数 (sensor_fusion.cpp 多处)。
+    // 语义: > max_distance_cm(4.0m) 的失效兜底值, 表示"无有效读数"; L0/L1/L2/L3 分层据此判 ultra_valid。
+    static constexpr double  kUltrasonicInvalidM = 4.5;
 };
 
 // ============================================================
@@ -64,13 +67,15 @@ struct UltrasonicSensorEntry {
     std::string description;
 };
 
-inline std::unordered_map<std::string, UltrasonicSensorEntry> get_ultrasonic_layout() {
-    return {
+// ALG-10 (v2.2): 返回 const 引用 + 局部 static, 避免每次调用按值构造 unordered_map
+inline const std::unordered_map<std::string, UltrasonicSensorEntry>& get_ultrasonic_layout() {
+    static const std::unordered_map<std::string, UltrasonicSensorEntry> layout = {
         {"front_left",  {1, "左前",  -30.0, 0.0,  23, 24, "覆盖左前方盲区"}},
         {"front_center",{2, "正前",  0.0,   0.0,  17, 27, "检测正前方障碍物"}},
         {"front_right", {3, "右前",  30.0,  0.0,  5,  6,  "覆盖右前方盲区"}},
         {"bottom",      {4, "底部朝下",0.0, -90.0,13, 19, "检测地面悬崖/台阶（防跌落）"}},
     };
+    return layout;
 }
 
 // ============================================================
@@ -88,12 +93,14 @@ struct EnvWeights {
     double ultrasonic;
 };
 
-inline std::unordered_map<std::string, EnvWeights> get_environment_weights() {
-    return {
+// ALG-10 (v2.2): 返回 const 引用 + 局部 static, 避免 fuse() 每次按值构造 unordered_map
+inline const std::unordered_map<std::string, EnvWeights>& get_environment_weights() {
+    static const std::unordered_map<std::string, EnvWeights> weights = {
         {"indoor",      {0.8, 0.2}},
         {"semi_indoor", {0.5, 0.5}},
         {"outdoor",     {0.1, 0.9}},
     };
+    return weights;
 }
 
 // ============================================================
@@ -132,21 +139,31 @@ struct EmergencyConfig {
 };
 
 // ============================================================
-// 环境红外强度阈值 (来自 TSL2591, 归一化 0.0~1.0)
+// 环境判定统一阈值 (ALG-3 v2.2: 深度代理与红外同源, 消除双轨)
 // ============================================================
-// 说明: 以下为软件组预设的保守默认值, 未经过实测标定。
-// 硬件组请按 docs/IR_CALIBRATION.md 标定后修改这两个数字, 代码逻辑无需改动。
-// 判定规则: light <= ir_indoor_max   -> indoor      (Astra 权重高)
-//           light >= ir_outdoor_min  -> outdoor     (超声波主导)
-//           之间                       -> semi_indoor (两者均衡)
+// TSL2591 已取消购买 (见 docs/FIX_PLAN.md F3 决策), 环境光强判定默认走
+// estimate_ambient_light() 深度图代理; sensor_ir 仅作可选增强 (模拟模式可用)。
+// 深度代理 (classify_environment) 与红外 (light_to_env) 共用此阈值, 避免双轨。
+// 判定规则: level <= indoor_max  -> INDOOR      (Astra 权重高)
+//           level >= outdoor_min -> OUTDOOR     (超声波主导)
+//           之间                  -> SEMI_INDOOR (两者均衡)
+struct EnvironmentThresholds {
+    static constexpr double indoor_max  = 0.3;
+    static constexpr double outdoor_min = 0.7;
+};
+
+// ============================================================
+// 环境红外强度阈值 (TSL2591, 归一化 0.0~1.0) —— 已与深度代理同源
+// ============================================================
+// 说明: TSL2591 已取消购买, 此结构仅作可选增强 (未来接入真机 IR 时用)。
+// 阈值已对齐 EnvironmentThresholds (0.3/0.7), 不再保留原 0.10/0.40 双轨;
+// 若未来重启 TSL2591, 按 docs/IR_CALIBRATION.md 实测标定后改 EnvironmentThresholds 一处即可。
 struct IrConfig {
-    // R-2: 阈值与 IR_MAX_REF=20000 归一化分布同数量级 (FIX-4 改分母后同步):
-    // 25x 增益实测: 室内 200-2000 → 0.01-0.10, 窗边 2000-8000 → 0.10-0.40, 太阳直射 >20000 → clamp 1.0
-    // 原 0.30/0.70 会把窗边(0.10-0.40)大部分误判为 INDOOR; 最终值仍待硬件组按 docs/IR_CALIBRATION.md 标定
-    static constexpr double ir_indoor_max  = 0.10; // 归一化红外强度上限: 室内
-    static constexpr double ir_outdoor_min = 0.40; // 归一化红外强度下限: 室外/强光
-    static constexpr double ir_sim_min     = 0.05; // 模拟模式红外最小值
-    static constexpr double ir_sim_max     = 0.90; // 模拟模式红外最大值
+    // ALG-3 (v2.2): 与 EnvironmentThresholds 同源 (TSL2591 取消后无需独立标定刻度)
+    static constexpr double ir_indoor_max  = EnvironmentThresholds::indoor_max;   // 0.3
+    static constexpr double ir_outdoor_min = EnvironmentThresholds::outdoor_min;  // 0.7
+    static constexpr double ir_sim_min     = 0.05; // 模拟模式红外最小值 (参考, simulate_ir 实用 uniform(0,1))
+    static constexpr double ir_sim_max     = 0.90; // 模拟模式红外最大值 (参考)
 };
 
 } // namespace mechdog

@@ -9,6 +9,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(MSVC)
     add_compile_options(/std:c++20 /utf-8)
 endif()
+# ALG-9 (v2.2): GCC/Clang 也显式指定 UTF-8 源/执行字符集 (与 MSVC /utf-8 对齐,
+# 避免某些 locale 下中文注释/字符串字面量被按 GBK 解码导致乱码或编译警告)
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    add_compile_options(-finput-charset=UTF-8 -fexec-charset=UTF-8)
+endif()
 
 # 条件编译选项
 option(USE_ASTRA_SDK "Enable Astra Pro via Orbbec Astra SDK (真机模式)" OFF)
