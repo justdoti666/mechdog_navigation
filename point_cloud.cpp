@@ -1,0 +1,144 @@
+/**
+ * 点云模块实现 (P0)
+ *
+ * 设计文档: docs/POINT_CLOUD_DESIGN.md (§5 反投影 / §6 坐标变换)
+ *
+ * 零依赖: 仅 <cmath> + <cassert>, 不引 PCL/Eigen。
+ * 可用 g++ -std=c++20 -fsanitize=address,undefined 模拟单测。
+ */
+#include "point_cloud.h"
+
+#include <cassert>
+#include <cmath>
+
+namespace mechdog {
+
+// ============================================================
+// 深度图(mm) → 点云(camera_optical 系, 米)
+//
+// 反投影公式 (§5.1, 基于 optical 系 Z前 Y下):
+//   X = (u - cx) * d / fx     // 右
+//   Y = (v - cy) * d / fy     // 下
+//   Z = d                     // 前
+// 其中 d = px / 1000.0 (mm → m)。
+//
+// 有效性口径 (§5.2): px==0 或 d<min_depth_m 或 d>max_depth_m → 丢弃
+// 与 analyze_region 完全一致, 保证点云与三区域感知对"有效"的定义相同。
+// ============================================================
+void depth_to_cloud(const uint16_t* depth, int w, int h,
+                    const CameraIntrinsics& K, PointCloud& out) {
+    out.points.clear();
+    out.frame_id = "camera_optical";
+
+    // 空输入防御 (失效哨兵: 返回空点云, 不崩溃)
+    if (!depth || w <= 0 || h <= 0) return;
+
+    // fx/fy 非零防御 (除零保护; 正常 CameraIntrinsics 默认值保证非零)
+    assert(K.fx > 0.0 && K.fy > 0.0 && "CameraIntrinsics fx/fy must be positive");
+
+    // 粗略预留 (假设 ~25% 有效像素, 避免反复 realloc)
+    out.points.reserve(static_cast<size_t>(w) * h / 4);
+
+    for (int v = 0; v < h; ++v) {
+        for (int u = 0; u < w; ++u) {
+            uint16_t px = depth[static_cast<size_t>(v) * w + u];
+            if (px == 0) continue;  // 无效像素 (与 analyze_region 同口径)
+
+            double d = px / 1000.0;  // mm → m (§5.2 显式单位转换)
+            if (d < K.min_depth_m || d > K.max_depth_m) continue;  // 超范围
+
+            Point3D p;
+            p.x = (u - K.cx) * d / K.fx;  // 右
+            p.y = (v - K.cy) * d / K.fy;  // 下
+            p.z = d;                      // 前
+            out.points.push_back(p);
+        }
+    }
+}
+
+// ============================================================
+// camera_optical → camera_link 固定旋转 (§6.1)
+//
+// 矩阵 [[0,0,1],[-1,0,0],[0,-1,0]] = Rz(-90°)·Rx(-90°):
+//   X_link =  Z_opt  (前 ← 前)
+//   Y_link = -X_opt  (左 ← 右反)
+//   Z_link = -Y_opt  (上 ← 下反)
+//
+// ⚠️ 不是单次 roll — 单 roll 只能得到 {X右,Y前,Z上}, Y/Z 仍错。
+// 此旋转是相机坐标系固定属性, 与安装无关, 可直接硬编码。
+// ============================================================
+void transform_optical_to_link(const PointCloud& in, PointCloud& out) {
+    out.seq = in.seq;
+    out.stamp = in.stamp;
+    out.frame_id = "camera_link";
+    out.points.resize(in.points.size());
+
+    for (size_t i = 0; i < in.points.size(); ++i) {
+        const auto& s = in.points[i];
+        auto& d = out.points[i];
+        d.x =  s.z;   // X_link =  Z_opt
+        d.y = -s.x;   // Y_link = -X_opt
+        d.z = -s.y;   // Z_link = -Y_opt
+        d.r = s.r; d.g = s.g; d.b = s.b;  // 保色
+    }
+}
+
+// ============================================================
+// camera_optical → base_link 全链路 (§6.1 + §6.2)
+//
+// Step 1: optical → link (固定旋转, 调用 transform_optical_to_link)
+// Step 2: link → base (CameraExtrinsics 的 ZYX 内旋 + 平移)
+//
+// ZYX 内旋: R = Rz(yaw) · Ry(pitch) · Rx(roll)
+//   Rx(roll)  = [[1,0,0], [0,cr,-sr], [0,sr,cr]]
+//   Ry(pitch) = [[cp,0,sp], [0,1,0], [-sp,0,cp]]
+//   Rz(yaw)   = [[cy,-sy,0], [sy,cy,0], [0,0,1]]
+//
+// 展开后:
+//   R00 = cy*cp        R01 = cy*sp*sr - sy*cr   R02 = cy*sp*cr + sy*sr
+//   R10 = sy*cp        R11 = sy*sp*sr + cy*cr   R12 = sy*sp*cr - cy*sr
+//   R20 = -sp          R21 = cp*sr              R22 = cp*cr
+//
+// p_base = R · p_link + t
+//
+// pitch 方向验证: 前向轴 [1,0,0] → z 分量 = R20 = -sin(pitch)。
+// pitch > 0 → z < 0 (光轴朝下), 故前倾俯视取正值 (+15°)。见 §4。
+// ============================================================
+void transform_to_base(const PointCloud& in, const CameraExtrinsics& E,
+                       PointCloud& out) {
+    // Step 1: optical → link
+    PointCloud link;
+    transform_optical_to_link(in, link);
+
+    // Step 2: link → base (ZYX Euler + translation)
+    const double cr = std::cos(E.roll),  sr = std::sin(E.roll);
+    const double cp = std::cos(E.pitch), sp = std::sin(E.pitch);
+    const double cy = std::cos(E.yaw),   sy = std::sin(E.yaw);
+
+    // ZYX 内旋展开 (见上方注释)
+    const double R00 = cy * cp;
+    const double R01 = cy * sp * sr - sy * cr;
+    const double R02 = cy * sp * cr + sy * sr;
+    const double R10 = sy * cp;
+    const double R11 = sy * sp * sr + cy * cr;
+    const double R12 = sy * sp * cr - cy * sr;
+    const double R20 = -sp;
+    const double R21 = cp * sr;
+    const double R22 = cp * cr;
+
+    out.seq = link.seq;
+    out.stamp = link.stamp;
+    out.frame_id = "base_link";
+    out.points.resize(link.points.size());
+
+    for (size_t i = 0; i < link.points.size(); ++i) {
+        const auto& s = link.points[i];
+        auto& d = out.points[i];
+        d.x = R00 * s.x + R01 * s.y + R02 * s.z + E.x;
+        d.y = R10 * s.x + R11 * s.y + R12 * s.z + E.y;
+        d.z = R20 * s.x + R21 * s.y + R22 * s.z + E.z;
+        d.r = s.r; d.g = s.g; d.b = s.b;  // 保色
+    }
+}
+
+} // namespace mechdog

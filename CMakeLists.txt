@@ -49,6 +49,7 @@ set(SOURCES
     sensor_ir.cpp
     sensor_fusion.cpp
     path_planner.cpp
+    point_cloud.cpp
 )
 
 # 可执行文件
@@ -86,6 +87,12 @@ if(USE_ASTRA_SDK)
     target_link_libraries(test_fusion PRIVATE astra_core astra_core_api astra)
 endif()
 add_test(NAME fusion_tests COMMAND test_fusion)
+
+# 点云模块单测 (P0, 设计文档 docs/POINT_CLOUD_DESIGN.md §13)
+add_executable(test_point_cloud tests/test_point_cloud.cpp point_cloud.cpp)
+target_include_directories(test_point_cloud PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_point_cloud PRIVATE Threads::Threads)
+add_test(NAME point_cloud_tests COMMAND test_point_cloud)
 
 # 安装
 install(TARGETS ${PROJECT_NAME} DESTINATION bin)

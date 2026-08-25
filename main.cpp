@@ -17,6 +17,7 @@
 #include "sensor_ir.h"
 #include "sensor_fusion.h"
 #include "path_planner.h"
+#include "point_cloud.h"
 
 #include <chrono>
 #include <csignal>
@@ -55,6 +56,14 @@ static bool g_have_result = false;
 // 共享最新彩色帧 (真机 RGB 可视化; 由主循环写入, 窗口线程读取)
 static ColorFrameData g_color_frame;
 static bool g_have_color = false;
+
+// 共享最新点云 (由主循环写入, 窗口线程读取; --cloud 模式启用)
+static PointCloud g_latest_cloud;
+static bool g_have_cloud = false;
+// 点云可视化模式开关 (--cloud; 窗口线程读, true 时优先渲染点云而非彩色帧)
+static bool g_view_cloud = false;
+// 点云视图类型 (false=俯视图 TopView, true=侧视图 SideView; 按 S 切换)
+static bool g_view_side = false;
 
 // 可视化共享数据互斥锁 (主循环写 / 窗口线程读, 防数据竞争崩溃)
 static std::mutex g_viz_mutex;
@@ -112,6 +121,181 @@ static std::wstring widen(const char* s) {
     return out;
 }
 
+// 绘制彩色帧到指定区域 (真机 RGB 画面 + DIST/NEAR 叠加)
+static void draw_color_frame(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
+                             const ColorFrameData& local_color) {
+    using namespace Gdiplus;
+    if (!local_color.valid || local_color.rgb.empty() || cw <= 0 || ch <= 0) return;
+
+    // Astra SDK 返回 RGB 字节序; GDI+ PixelFormat24bppRGB 实际期望 BGR
+    // (Windows 历史遗留) -> 需交换 R/B 通道, 否则画面红蓝互换偏色
+    std::vector<BYTE> bgr_buf(local_color.rgb.size());
+    const BYTE* src = local_color.rgb.data();
+    for (size_t i = 0; i + 2 < bgr_buf.size(); i += 3) {
+        bgr_buf[i]     = src[i + 2];  // B
+        bgr_buf[i + 1] = src[i + 1];  // G
+        bgr_buf[i + 2] = src[i];      // R
+    }
+    Bitmap bmp(local_color.width, local_color.height,
+               local_color.width * 3, PixelFormat24bppRGB, bgr_buf.data());
+    Rect dst(x, y, cw, ch);
+    g.DrawImage(&bmp, dst, 0, 0, local_color.width, local_color.height, UnitPixel);
+
+    // 左上角叠加: DIST (中央平均距离, 蓝) + NEAR (最近障碍, 青)
+    Font font_big(L"Arial", 16, FontStyleBold);
+    Font font_small(L"Arial", 13);
+    SolidBrush dist_brush(Color(255, 60, 160, 255));
+    SolidBrush near_brush(Color(255, 60, 255, 230));
+    SolidBrush shadow(Color(160, 0, 0, 0));
+
+    wchar_t buf[32];
+    std::wstring dist_txt, near_txt;
+    if (local_color.center_distance_m > 0) {
+        swprintf(buf, 32, L"DIST %.2fm", local_color.center_distance_m);
+        dist_txt = buf;
+    } else dist_txt = L"DIST --";
+    if (local_color.nearest_distance_m > 0) {
+        swprintf(buf, 32, L"NEAR %.2fm", local_color.nearest_distance_m);
+        near_txt = buf;
+    } else near_txt = L"NEAR --";
+
+    Gdiplus::PointF ds((REAL)(x + 13), (REAL)(y + 13)), dt((REAL)(x + 12), (REAL)(y + 12));
+    Gdiplus::PointF ns((REAL)(x + 37), (REAL)(y + 37)), nt((REAL)(x + 36), (REAL)(y + 36));
+    g.DrawString(dist_txt.c_str(), -1, &font_big, ds, &shadow);
+    g.DrawString(dist_txt.c_str(), -1, &font_big, dt, &dist_brush);
+    g.DrawString(near_txt.c_str(), -1, &font_small, ns, &shadow);
+    g.DrawString(near_txt.c_str(), -1, &font_small, nt, &near_brush);
+
+    // 右上角模式提示
+    Font font(L"Arial", 12);
+    SolidBrush dim(Color(220, 160, 160, 160));
+    Gdiplus::PointF tip((REAL)(x + cw - 160), (REAL)(y + 10));
+    g.DrawString(L"REAL (RGB)", -1, &font, tip, &dim);
+}
+
+// 绘制点云到指定区域 (camera_link 系; side_view=false=俯视 X-Y, true=侧视 X-Z)
+static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
+                            const PointCloud& local_cloud, bool side_view) {
+    using namespace Gdiplus;
+    if (local_cloud.points.empty() || cw <= 0 || ch <= 0) return;
+
+    Font font(L"Arial", 12);
+    Font font_big(L"Arial", 16, FontStyleBold);
+    SolidBrush white(Color(255, 240, 240, 240));
+    SolidBrush dim(Color(220, 160, 160, 160));
+
+    int cxm = x + cw / 2;
+    int cym = y + ch / 2 + 20;
+    int range_px = (int)(ch * 0.34);
+    double max_range = 8.0;
+
+    if (!side_view) {
+        // ===== 俯视图: 前 X=上, 左 Y=右 =====
+        // 同心圆 (1m/2m/4m/8m)
+        for (int m : {1, 2, 4, 8}) {
+            int r = (int)(range_px * (m / max_range));
+            Pen pen(Color(60, 255, 255, 255), 1);
+            g.DrawEllipse(&pen, cxm - r, cym - r, r * 2, r * 2);
+            Gdiplus::PointF tp((REAL)(cxm + r + 4), (REAL)(cym - 4));
+            g.DrawString(std::to_wstring(m).c_str(), -1, &font, tp, &dim);
+        }
+        // 前方方向箭头
+        Pen arrow(Color(120, 255, 255, 255), 2);
+        g.DrawLine(&arrow, cxm, cym, cxm, cym - range_px - 30);
+        // FOV 扇形边界 (水平 58.4°, 相机朝上)
+        Pen fov_pen(Color(90, 100, 180, 255), 1);
+        double fov_h = 58.4 * 3.14159265 / 180.0;
+        int kx1 = cxm + (int)(std::sin(-fov_h/2) * range_px);
+        int ky1 = cym - (int)(std::cos(-fov_h/2) * range_px);
+        int kx2 = cxm + (int)(std::sin(fov_h/2) * range_px);
+        int ky2 = cym - (int)(std::cos(fov_h/2) * range_px);
+        g.DrawLine(&fov_pen, cxm, cym, kx1, ky1);
+        g.DrawLine(&fov_pen, cxm, cym, kx2, ky2);
+        // 机器人本体
+        SolidBrush body(Color(255, 70, 130, 200));
+        g.FillRectangle(&body, cxm - 18, cym - 18, 36, 36);
+
+        // 点云 (X前=上, Y左=右) — 近=红, 远=蓝
+        for (const auto& p : local_cloud.points) {
+            double dist = std::sqrt(p.x*p.x + p.y*p.y + p.z*p.z);
+            if (dist > max_range || dist < 0.1) continue;
+            int sx = cxm + (int)(p.y / max_range * range_px);
+            int sy = cym - (int)(p.x / max_range * range_px);
+            if (sx < x || sx >= x + cw || sy < y || sy >= y + ch) continue;
+            double t = (std::min)(1.0, dist / max_range);
+            int r_c = (int)(255 * (1.0 - t * 0.8));
+            int g_c = (int)(200 * (1.0 - std::abs(t - 0.5) * 2.0));
+            int b_c = (int)(255 * t);
+            SolidBrush pb(Color(200, r_c, g_c, b_c));
+            g.FillEllipse(&pb, sx - 1, sy - 1, 3, 3);
+        }
+        Gdiplus::PointF tip((REAL)(x + cw - 220), (REAL)(y + 10));
+        g.DrawString(L"Cloud TopView (link)", -1, &font, tip, &dim);
+    } else {
+        // ===== 侧视图: 前距离 X=右, 高度 Z=上 =====
+        // 网格 (1m 距离线, 高度 ±2m)
+        double z_max = 3.0;   // 显示高度 -3~3m
+        for (int m : {1, 2, 4, 8}) {
+            int rx = (int)(range_px * (m / max_range));
+            Pen pen(Color(60, 255, 255, 255), 1);
+            g.DrawLine(&pen, cxm + rx, y, cxm + rx, y + ch - 56);
+            Gdiplus::PointF tp((REAL)(cxm + rx + 3), (REAL)(y + 8));
+            g.DrawString(std::to_wstring(m).c_str(), -1, &font, tp, &dim);
+        }
+        // 地平线 (z=0)
+        int ground_y = cym;   // z=0 → 屏幕 cy (link Z上为+)
+        Pen ground(Color(90, 255, 255, 255), 1);
+        g.DrawLine(&ground, x, ground_y, x + cw, ground_y);
+        // 相机位置标记
+        SolidBrush cam(Color(255, 70, 130, 200));
+        g.FillRectangle(&cam, cxm - 9, ground_y - 9, 18, 18);
+
+        // 点云 (X前=右, Z高=上) — 近=红, 远=蓝
+        for (const auto& p : local_cloud.points) {
+            if (p.x > max_range || p.x < 0.05) continue;
+            if (std::abs(p.y) > max_range) continue;
+            double dist = std::sqrt(p.x*p.x + p.y*p.y + p.z*p.z);
+            if (dist > max_range) continue;
+            int sx = cxm + (int)(p.x / max_range * range_px);
+            int sy = ground_y - (int)(p.z / z_max * (ch * 0.34));
+            if (sx < x || sx >= x + cw || sy < y || sy >= y + ch) continue;
+            double t = (std::min)(1.0, dist / max_range);
+            int r_c = (int)(255 * (1.0 - t * 0.8));
+            int g_c = (int)(200 * (1.0 - std::abs(t - 0.5) * 2.0));
+            int b_c = (int)(255 * t);
+            SolidBrush pb(Color(200, r_c, g_c, b_c));
+            g.FillEllipse(&pb, sx - 1, sy - 1, 3, 3);
+        }
+        // 高度标尺
+        for (double zm : {-2.0, -1.0, 1.0, 2.0}) {
+            int sy = ground_y - (int)(zm / z_max * (ch * 0.34));
+            Pen p2(Color(50, 255, 255, 255), 1);
+            g.DrawLine(&p2, x, sy, x + 8, sy);
+            wchar_t zb[16];
+            swprintf(zb, 16, L"%.0fm", zm);
+            Gdiplus::PointF zp((REAL)(x + 10), (REAL)(sy - 6));
+            g.DrawString(zb, -1, &font, zp, &dim);
+        }
+        Gdiplus::PointF tip((REAL)(x + cw - 220), (REAL)(y + 10));
+        g.DrawString(L"Cloud SideView (X前→右, Z高→上)", -1, &font, tip, &dim);
+    }
+
+    // 底部状态栏
+    SolidBrush bar(Color(255, 20, 20, 28));
+    g.FillRectangle(&bar, x, y + ch - 56, cw, 56);
+    Pen line(Color(80, 255, 255, 255), 1);
+    g.DrawLine(&line, x, y + ch - 56, x + cw, y + ch - 56);
+
+    wchar_t buf[128];
+    swprintf(buf, 128, L"POINT CLOUD  pts=%zu  frame=%s  seq=%llu",
+             local_cloud.points.size(),
+             widen(local_cloud.frame_id.c_str()).c_str(),
+             (unsigned long long)local_cloud.seq);
+    std::wstring status(buf);
+    Gdiplus::PointF sp((REAL)(x + 12), (REAL)(y + ch - 52));
+    g.DrawString(status.c_str(), -1, &font_big, sp, &white);
+}
+
 // 窗口绘制 (双缓冲: 先在内存 Bitmap 画完整帧, 再一次性上屏, 消除闪烁)
 static void draw_scene(HDC hdc, int w, int h) {
     using namespace Gdiplus;
@@ -126,74 +310,56 @@ static void draw_scene(HDC hdc, int w, int h) {
     SolidBrush white(Color(255, 240, 240, 240));
     SolidBrush dim(Color(220, 160, 160, 160));
 
-    // ===== 彩色模式: 真机 RGB 画面 + DIST/NEAR 叠加 =====
+    // ===== 加锁拷贝共享数据到局部 (窗口线程读, 主循环写, 防竞态) =====
+    ColorFrameData local_color;
+    bool have_color = false;
+    PointCloud local_cloud;
+    bool have_cloud = false;
     {
-        // 加锁拷贝共享彩色帧到局部 (窗口线程读, 主循环写, 防竞态)
-        ColorFrameData local_color;
-        bool have_color = false;
-        {
-            std::lock_guard<std::mutex> lock(g_viz_mutex);
-            local_color = g_color_frame;
-            have_color = g_have_color;
-        }
-        if (have_color && local_color.valid && !local_color.rgb.empty()) {
-        // Astra SDK 返回 RGB 字节序; GDI+ PixelFormat24bppRGB 实际期望 BGR
-        // (Windows 历史遗留) -> 需交换 R/B 通道, 否则画面红蓝互换偏色
-        std::vector<BYTE> bgr_buf(local_color.rgb.size());
-        const BYTE* src = local_color.rgb.data();
-        for (size_t i = 0; i + 2 < bgr_buf.size(); i += 3) {
-            bgr_buf[i]     = src[i + 2];  // B
-            bgr_buf[i + 1] = src[i + 1];  // G
-            bgr_buf[i + 2] = src[i];      // R
-        }
-        // 画彩色帧 (拉伸到窗口客户区)
-        Bitmap bmp(local_color.width, local_color.height,
-                   local_color.width * 3, PixelFormat24bppRGB,
-                   bgr_buf.data());
-        Rect dst(0, 0, w, h);
-        g.DrawImage(&bmp, dst, 0, 0, local_color.width, local_color.height,
-                    UnitPixel);
+        std::lock_guard<std::mutex> lock(g_viz_mutex);
+        local_color = g_color_frame;
+        have_color = g_have_color;
+        local_cloud = g_latest_cloud;
+        have_cloud = g_have_cloud;
+    }
 
-        // 左上角叠加: DIST (中央平均距离, 蓝) + NEAR (最近障碍, 青)
-        SolidBrush dist_brush(Color(255, 60, 160, 255));
-        SolidBrush near_brush(Color(255, 60, 255, 230));
-        SolidBrush shadow(Color(160, 0, 0, 0));
+    bool color_ok = have_color && local_color.valid && !local_color.rgb.empty();
+    bool cloud_ok = have_cloud && !local_cloud.points.empty();
 
-        std::wstring dist_txt;
-        if (local_color.center_distance_m > 0) {
-            wchar_t buf[32];
-            swprintf(buf, 32, L"DIST %.2fm", local_color.center_distance_m);
-            dist_txt = buf;
+    // ===== 点云模式: 优先点云视图 (分屏或全屏) =====
+    if (g_view_cloud) {
+        if (color_ok && cloud_ok) {
+            // 分屏: 左半彩色帧, 右半点云俯视图
+            int half = w / 2;
+            draw_color_frame(g, 0, 0, half, h, local_color);
+            draw_cloud_view(g, half, 0, w - half, h, local_cloud, g_view_side);
+            Pen sep(Color(120, 255, 255, 255), 1);
+            g.DrawLine(&sep, half, 0, half, h);
+        } else if (cloud_ok) {
+            // 仅有彩色帧时也要保证有点云可看 (否则退化全屏点云)
+            draw_cloud_view(g, 0, 0, w, h, local_cloud, g_view_side);
+        } else if (color_ok) {
+            // 点云尚未就绪, 暂退彩色帧
+            draw_color_frame(g, 0, 0, w, h, local_color);
         } else {
-            dist_txt = L"DIST --";
+            Gdiplus::PointF tip((REAL)(w - 200), 10);
+            g.DrawString(L"waiting for cloud...", -1, &font, tip, &dim);
+            Gdiplus::PointF sp(12, (REAL)(h - 52));
+            g.DrawString(L"POINT CLOUD  (no data)", -1, &font_big, sp, &white);
         }
-        std::wstring near_txt;
-        if (local_color.nearest_distance_m > 0) {
-            wchar_t buf[32];
-            swprintf(buf, 32, L"NEAR %.2fm", local_color.nearest_distance_m);
-            near_txt = buf;
-        } else {
-            near_txt = L"NEAR --";
-        }
-
-        // 阴影 + 文字 (字号 18/13, 与 rgb_stream 一致)
-        Gdiplus::PointF ds(13, 13), dt(12, 12);
-        Gdiplus::PointF ns(37, 37), nt(36, 36);
-        g.DrawString(dist_txt.c_str(), -1, &font_big, ds, &shadow);
-        g.DrawString(dist_txt.c_str(), -1, &font_big, dt, &dist_brush);
-        Font font_small(L"Arial", 13);
-        g.DrawString(near_txt.c_str(), -1, &font_small, ns, &shadow);
-        g.DrawString(near_txt.c_str(), -1, &font_small, nt, &near_brush);
-
-        // 右上角模式提示
-        Gdiplus::PointF tip((REAL)(w - 160), 10);
-        g.DrawString(L"REAL (RGB)", -1, &font, tip, &dim);
 
         // 一次性上屏 (双缓冲)
         Graphics screen(hdc);
         screen.DrawImage(&mem_bmp, 0, 0, w, h);
         return;
-        }
+    }
+
+    // ===== 非点云模式: 彩色帧优先 =====
+    if (color_ok) {
+        draw_color_frame(g, 0, 0, w, h, local_color);
+        Graphics screen(hdc);
+        screen.DrawImage(&mem_bmp, 0, 0, w, h);
+        return;
     }
 
     // 加锁拷贝共享融合结果到局部 (窗口线程读, 主循环写, 防竞态; 与彩色帧同法, FIX-1)
@@ -305,6 +471,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_ERASEBKGND:
             return 1;
+        case WM_KEYDOWN:
+            // S: 切换点云侧视图/俯视图 (仅点云模式有效)
+            if (wp == 'S' || wp == 's') g_view_side = !g_view_side;
+            return 0;
         case WM_CLOSE:
             g_window_open = 0;
             g_stop.store(1);
@@ -377,12 +547,15 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, on_signal);
 
     // 命令行参数: --real 使用真机 (Astra SDK + 真实红外), 默认模拟模式
+    //             --cloud 点云可视化 (深度图反投影, 俯视图)
     bool use_real = false;
     bool no_viz = false;
+    bool show_cloud = false;
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
         if (arg == "--real" || arg == "-r") use_real = true;
         if (arg == "--noviz") no_viz = true;
+        if (arg == "--cloud" || arg == "-c") show_cloud = true;
     }
 
 #ifdef USE_ASTRA_SDK
@@ -411,6 +584,8 @@ int main(int argc, char** argv) {
     }
     // 窗口线程独立刷新彩色帧用
     g_astra_ptr = &astra;
+    // 点云可视化模式: 提前设全局标志 (窗口线程 draw_scene 据此优先渲染点云)
+    g_view_cloud = show_cloud;
     // 启动可视化窗口线程 (--noviz 可禁用, 用于定位崩溃)
     if (!no_viz) {
         CreateThread(nullptr, 0, window_thread, nullptr, 0, nullptr);
@@ -421,8 +596,18 @@ int main(int argc, char** argv) {
 
     std::cout << "=== mechdog_navigation "
               << (use_real ? "真机模式 (Astra SDK)" : "模拟模式")
+              << (show_cloud ? " + 点云可视化" : "")
               << " (带可视化窗口) ===" << std::endl;
     std::cout << "关闭可视化窗口 或 Ctrl+C 退出" << std::endl << std::endl;
+
+    CameraIntrinsics cloud_K;       // FOV 反推内参 (真机可后续补 SDK 直读)
+    CameraExtrinsics cloud_E;       // 外参初值 (装机后量测)
+    // 狗未接时用占位外参 (§18.4): 无偏移无俯角, 看光学系→link 系形状
+    if (show_cloud && !use_real) {
+        // 模拟模式点云: 无外参, 纯验证链路
+        cloud_E.x = 0; cloud_E.y = 0; cloud_E.z = 0;
+        cloud_E.roll = 0; cloud_E.pitch = 0; cloud_E.yaw = 0;
+    }
 
     unsigned int tick = 0;
     while (!g_stop.load()) {
@@ -438,6 +623,39 @@ int main(int argc, char** argv) {
             g_have_result = true;
             if (!use_real) g_have_color = false;
         }
+
+        // 点云模式: 从最新深度帧反投影 → optical→link → 存共享
+        if (show_cloud) {
+            AstraFrame frame = astra.get_latest_frame();
+            if (frame.valid && !frame.depth_map.empty()
+                && frame.depth_width > 0 && frame.depth_height > 0) {
+                PointCloud cloud_opt;
+                depth_to_cloud(frame.depth_map.data(),
+                               frame.depth_width, frame.depth_height,
+                               cloud_K, cloud_opt);
+
+                // optical → link (固定旋转, §6.1)
+                PointCloud cloud_link;
+                transform_optical_to_link(cloud_opt, cloud_link);
+                cloud_link.seq = frame.frame_seq;
+                cloud_link.stamp = frame.timestamp;
+
+                // 下采样: 每隔 step 个点取 1 个 (640×480 全量 ~30万点, 画不动)
+                const int step = 8;
+                PointCloud cloud_ds;
+                cloud_ds.seq = cloud_link.seq;
+                cloud_ds.stamp = cloud_link.stamp;
+                cloud_ds.frame_id = cloud_link.frame_id;
+                cloud_ds.points.reserve(cloud_link.points.size() / step + 1);
+                for (size_t i = 0; i < cloud_link.points.size(); i += step) {
+                    cloud_ds.points.push_back(cloud_link.points[i]);
+                }
+
+                std::lock_guard<std::mutex> lock(g_viz_mutex);
+                g_latest_cloud = cloud_ds;
+                g_have_cloud = true;
+            }
+        }
 #endif
 
         std::cout << "[" << std::fixed << std::setprecision(2)
@@ -449,6 +667,7 @@ int main(int argc, char** argv) {
                   << " min_fwd=" << result.min_forward_distance_m << "m"
                   << " action=" << static_cast<int>(result.recommended_action)
                   << " vel=(" << cmd.linear << ", " << cmd.angular << ")"
+                  << (show_cloud ? " cloud_pts=" + std::to_string(g_latest_cloud.points.size()) : "")
                   << std::endl;
 
         for (const auto& kv : result.obstacles) {
