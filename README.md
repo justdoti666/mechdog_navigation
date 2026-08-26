@@ -41,8 +41,55 @@
 | 深度相机驱动 | `sensor_astra.h/.cpp` | Astra Pro 驱动，通过 Orbbec Astra SDK 获取深度图（含模拟模式；真机经 `USE_ASTRA_SDK` 编译） |
 | 红外强度驱动 | `sensor_ir.h/.cpp` | TSL2591 环境红外检测，用于环境自适应权重（含模拟模式） |
 | 传感器融合 | `sensor_fusion.h/.cpp` | 分层加权融合、环境自适应、障碍物分类、导航决策 |
+| 点云模块 | `point_cloud.h/.cpp` | 深度图→3D 点云反投影、光学系→link 系坐标变换（P0，供规划/建图预留，独立于融合层） |
 | 路径规划 | `path_planner.h/.cpp` | 导航动作 -> 速度指令映射（DWA 待实现） |
 | 单元测试 | `tests/test_fusion.cpp` | F4/F5 回归 + 融合逻辑验证 (`ctest`) |
+| 点云单测 | `tests/test_point_cloud.cpp` | 反投影/坐标变换/失效哨兵验证 (`ctest`，P0) |
+
+## 点云模块（P0）
+
+为未来「路径规划 + 建图（SLAM）」预埋的**几何感知中间层**，详见 `docs/POINT_CLOUD_DESIGN.md`。当前阶段（v2.3）融合层只用 3 个标量区域做反应式避障，深度图里约 30 万像素的 3D 几何信息被压缩后丢弃；点云模块把深度图还原为 3D 点云，向上支撑精细避障、建图与路径规划。
+
+### 坐标约定（与 ROS REP-103 一致）
+
+| 坐标系 | 轴约定 | 说明 |
+|--------|--------|------|
+| `camera_optical` | X 右, Y 下, Z 前 | 标准针孔光学系（Astra SDK 出帧系） |
+| `camera_link` | X 前, Y 左, Z 上 | 与 optical 差固定旋转 `Rz(-90°)·Rx(-90°)` |
+| `base_link` | X 前, Y 左, Z 上 | 底盘几何中心 |
+
+完整链路：`depth_to_cloud`（光学系反投影）→ `transform_optical_to_link`（固定旋转）→ `transform_to_base`（叠加 `CameraExtrinsics`）。P0 仅实现 `camera_optical → camera_link`，`base→odom→map` 留待 ROS `tf2` 集成。
+
+### 核心接口
+
+```cpp
+// 深度图(mm) → 点云(camera_optical 系, 米); 无效像素与 analyze_region 同口径丢弃
+void depth_to_cloud(const uint16_t* depth, int w, int h,
+                    const CameraIntrinsics& K, PointCloud& out);
+
+// camera_optical → camera_link 固定旋转 (§6.1 矩阵 [[0,0,1],[-1,0,0],[0,-1,0]])
+void transform_optical_to_link(const PointCloud& in, PointCloud& out);
+
+// camera_optical → base_link 全链路 (先 optical→link, 再叠加 ZYX 欧拉 + 平移外参)
+void transform_to_base(const PointCloud& in, const CameraExtrinsics& E,
+                       PointCloud& out);
+```
+
+### 实现要点
+
+- **零依赖**：仅标准库（`<vector>`/`<cmath>`），不引 PCL，可模拟单测
+- **内参初值**：由 FOV 反推（`fx≈572.7, fy≈572.3`），真机可后用 Astra SDK `intrinsics()` 直读
+- **轴约定**：`camera_optical` 与 `base_link` 的 {X右,Y下,Z前} vs {X前,Y左,Z上} 符号相反，是最大坑；已固化为 §6.1 矩阵并在单测中断言
+- **与融合层解耦**：点云模块独立于 `SensorFusion`，只"增强"不"否决"，不破坏现有三区域 fail-closed 安全语义
+
+### 真机点云可视化
+
+```bash
+# Astra Pro 真机 + 点云可视化 (分屏: 左半彩色帧 + 右半点云)
+./mechdog_navigation --real --cloud
+```
+
+窗口内按 `S` 键在**俯视图**（前=上、左=右）与**侧视图**（前距=右、高度=上）之间切换，用于验证反投影与轴约定。`--cloud` 需与 `--real` 配合（真机深度图）；模拟模式也可运行（`--cloud` 不带 `--real`），但模拟帧只有"正前方起伏墙"，主要验证链路。
 
 ## 传感器融合策略
 
@@ -95,9 +142,12 @@
 
 ```bash
 # 构建并运行测试（F4 悬崖安全 / F5 读数过滤 / 融合逻辑）
-cmake --build . --target test_fusion
+cmake --build . --target test_fusion test_point_cloud
 ctest --output-on-failure
 ```
+
+- `test_fusion` — 融合层回归（677 断言）
+- `test_point_cloud` — 点云模块 P0（反投影几何/内参/坐标变换/失效哨兵/轴约定，12 测试函数，30 万+ 断言）
 
 ## 构建
 
@@ -143,6 +193,9 @@ cmake --build .
 1. **Astra SDK 真机深度已实现** — 经 `USE_ASTRA_SDK` 编译后 `capture_frame()` 走 FrameListener 真机分支（深度+彩色双流）；未编译时回退模拟模式
 2. **环境红外阈值待标定** — `IrConfig` 为软件预设默认值，需硬件组按 `docs/IR_CALIBRATION.md` 实测后更新
 3. **wiringPi 真机 GPIO 未验证** — `measure_distance()` 的轮询实现受 Linux 调度抖动影响（1ms ≈ 17cm），后续可改边沿中断+时间戳
+4. **点云外参未标定** — P0 用 FOV 反推内参 + 外参占位初值（`x=0.12, y=0, z=0.18, pitch=+15°`）；狗未装机时按 §18.4 用零外参临时摆放联调，装机后需按 `docs/POINT_CLOUD_DESIGN.md` §12 量测 + 标定
+5. **点云地面分割/聚类/占据栅格未实现** — 属 P1/P2（`docs/POINT_CLOUD_DESIGN.md` §16 落地路线），当前 P0 仅反投影 + 坐标变换
+6. **Astra Pro 水平 FOV 仅 58.4°** — 点云俯视图因此呈中心扇形，属硬件物理限制，非代码问题
 
 ## 注意事项
 
