@@ -173,6 +173,17 @@ static void draw_color_frame(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
     g.DrawString(L"REAL (RGB)", -1, &font, tip, &dim);
 }
 
+// 右对齐绘制标签: 按字符串实测宽度定位 (原固定 220px 边距装不下中文长标签,
+// "Cloud SideView (X前→右, Z高→上)" 实宽 ~330px, 会被窗口右缘裁剪)
+static void draw_label_right_aligned(Gdiplus::Graphics& g, const wchar_t* text,
+                                     float right_x, float y,
+                                     const Gdiplus::Font& font,
+                                     const Gdiplus::Brush& brush) {
+    Gdiplus::RectF measured;
+    g.MeasureString(text, -1, &font, Gdiplus::RectF(0, 0, 0, 0), &measured);
+    g.DrawString(text, -1, &font, Gdiplus::PointF(right_x - measured.Width - 8.0f, y), &brush);
+}
+
 // 绘制点云到指定区域 (camera_link 系; side_view=false=俯视 X-Y, true=侧视 X-Z)
 static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
                             const PointCloud& local_cloud, bool side_view) {
@@ -229,8 +240,7 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
             SolidBrush pb(Color(200, r_c, g_c, b_c));
             g.FillEllipse(&pb, sx - 1, sy - 1, 3, 3);
         }
-        Gdiplus::PointF tip((REAL)(x + cw - 220), (REAL)(y + 10));
-        g.DrawString(L"Cloud TopView (link)", -1, &font, tip, &dim);
+        draw_label_right_aligned(g, L"Cloud TopView (link)", (REAL)(x + cw), (REAL)(y + 10), font, dim);
     } else {
         // ===== 侧视图: 前距离 X=右, 高度 Z=上 =====
         // 网格 (1m 距离线, 高度 ±2m)
@@ -276,8 +286,7 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
             Gdiplus::PointF zp((REAL)(x + 10), (REAL)(sy - 6));
             g.DrawString(zb, -1, &font, zp, &dim);
         }
-        Gdiplus::PointF tip((REAL)(x + cw - 220), (REAL)(y + 10));
-        g.DrawString(L"Cloud SideView (X前→右, Z高→上)", -1, &font, tip, &dim);
+        draw_label_right_aligned(g, L"Cloud SideView (X前→右, Z高→上)", (REAL)(x + cw), (REAL)(y + 10), font, dim);
     }
 
     // 底部状态栏
