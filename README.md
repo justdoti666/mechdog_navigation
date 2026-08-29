@@ -130,6 +130,8 @@ void transform_to_base(const PointCloud& in, const CameraExtrinsics& E,
 | ≤ 50cm | 警告 (WARNING) | 融合距离段转向/直行, 超声段后退 |
 | > 50cm | 安全 (SAFE) | 正常行驶 |
 
+> ⚠️ **上表未覆盖的兜底分支（真机部署前必读）**：前向三方向**全部失效**（Astra 三区域均无有效深度像素 + 三颗前向超声全无效）时，动作是 `SLOW_FORWARD` 降速盲行（≈0.1 m/s）**而非 STOP**，仅靠 bottom 悬崖检测兜底 —— 详见下方「已知限制」#7。
+
 ## 依赖项
 
 - **CMake** >= 3.16
@@ -196,6 +198,7 @@ cmake --build .
 4. **点云外参未标定** — P0 用 FOV 反推内参 + 外参占位初值（`x=0.12, y=0, z=0.18, pitch=+15°`）；狗未装机时按 §18.4 用零外参临时摆放联调，装机后需按 `docs/POINT_CLOUD_DESIGN.md` §12 量测 + 标定
 5. **点云地面分割/聚类/占据栅格未实现** — 属 P1/P2（`docs/POINT_CLOUD_DESIGN.md` §16 落地路线），当前 P0 仅反投影 + 坐标变换
 6. **Astra Pro 水平 FOV 仅 58.4°** — 点云俯视图因此呈中心扇形，属硬件物理限制，非代码问题
+7. **前向全盲时降速盲行而非停车（接真机前必须确认）** — Astra 三区域均无有效深度像素**且**三颗前向超声全部无效时，`determine_action`（`sensor_fusion.cpp`）返回 `SLOW_FORWARD`（0.5×v_max ≈ 0.1 m/s 盲目前进），仅靠 bottom 悬崖检测兜底；该行为有 `test_front_blind_with_bottom_valid_is_conservative` 测试锁定。**设计前提是全局层（师兄安全闸门 / Nav2）对该场景另有兜底** —— 接机械狗实机前务必与师兄确认闸门已覆盖；若本层是最后防线，应把该分支改为 `STOP`，避免镜头被挡 + 前向超声全坏时低速撞上静止障碍物。
 
 ## 注意事项
 
