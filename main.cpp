@@ -549,7 +549,8 @@ int main(int argc, char** argv) {
     // 命令行参数: --real 使用真机 (Astra SDK + 真实红外), 默认模拟模式
     //             --cloud 点云可视化 (深度图反投影, 俯视图)
     bool use_real = false;
-    bool no_viz = false;
+    // maybe_unused: no_viz 仅 Windows 可视化链路 (_WIN32 块) 消费, Linux/gcc 下未用
+    [[maybe_unused]] bool no_viz = false;
     bool show_cloud = false;
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
@@ -667,7 +668,11 @@ int main(int argc, char** argv) {
                   << " min_fwd=" << result.min_forward_distance_m << "m"
                   << " action=" << static_cast<int>(result.recommended_action)
                   << " vel=(" << cmd.linear << ", " << cmd.angular << ")"
+#ifdef _WIN32
+                  // P1: g_latest_cloud 仅在上方 _WIN32 块声明, 非 Windows 平台无点云可视化;
+                  // 无条件引用曾导致 Linux/gcc 构建直接失败 (第五轮 review)
                   << (show_cloud ? " cloud_pts=" + std::to_string(g_latest_cloud.points.size()) : "")
+#endif
                   << std::endl;
 
         for (const auto& kv : result.obstacles) {

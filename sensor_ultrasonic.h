@@ -37,7 +37,8 @@ struct UltrasonicArrayData {
     /** 获取前方最小距离（三颗前向传感器取最小值） */
     double get_min_forward_distance_cm() const;
 
-    /** 检测是否处于悬崖/台阶边缘 */
+    /** 检测是否处于悬崖/台阶边缘 (仅测试/回归使用: 生产链路悬崖判定走
+     *  UltrasonicArrayDriver::is_fall_risk —— ALG-1 独立 bottom 线程 fail-closed) */
     bool get_cliff_detected() const;
 };
 

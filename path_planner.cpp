@@ -9,6 +9,8 @@ VelocityCmd PathPlanner::plan(const FusionResult& fusion) {
     VelocityCmd target = action_to_cmd(fusion.recommended_action);
     // ALG-6 (v2.2): 速度 ramp —— 用闲置的 linear_accel/angular_accel 一阶限幅,
     // 消除 FORWARD→STOP→BACKWARD 瞬时跳变。safety_node timer 5Hz, dt=0.2s。
+    // P3: dt 与 ROS 胶水包 safety_node 的 200ms 发布周期隐式耦合 —— 改 on_timer
+    //     周期必须同步此处, 否则 ramp 斜率静默失真 (第五轮 review 注记)。
     constexpr double dt = 0.2;
     const double max_dv = PlannerConfig::linear_accel  * dt;  // 0.3*0.2 = 0.06 m/s 每步
     const double max_dw = PlannerConfig::angular_accel * dt;  // 0.5*0.2 = 0.10 rad/s 每步
