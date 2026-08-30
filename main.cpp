@@ -3,7 +3,9 @@
  *
  * 默认以模拟模式运行: 无需硬件, 在 PC 上即可验证传感器融合与导航决策全链路。
  * 真机模式: 通过 CMake 选项 USE_WIRINGPI / USE_ASTRA_SDK 编译, 并修改下方 use_simulated 参数。
- * --free: 手持自由姿态实验 —— 放宽地面高度先验带 (相机不在狗身上, 装高/俯角非标定值); 装机后勿用。
+ * --ground <h>: 手持实验 —— 相机离地 h 米 (默认 0.8), 外参归零使 base==link 显示同系,
+ *               地面先验 = -h、窗口收紧 0.12; 装机后勿用 (用默认外参+紧窗口)。
+ * --free: 等价 --ground 0.8 (兼容已发布用法的别名)。
  *
  * 构建 (Windows, 需要 GDI+):
  *   cmake -B build_vs -DCMAKE_CXX_STANDARD=17
@@ -23,6 +25,7 @@
 
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <atomic>
 #include <iomanip>
 #include <iostream>
@@ -233,11 +236,12 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
         SolidBrush body(Color(255, 70, 130, 200));
         g.FillRectangle(&body, cxm - 18, cym - 18, 36, 36);
 
-        // 点云 (X前=上, Y左=右) — 近=红, 远=蓝
+        // 点云 (地图视角: X前=屏幕上, Y左=屏幕左) — 近=红, 远=蓝
+        // 师兄实测发现左右镜像: camera_link +Y 指向机器人左方, 屏幕应画向左侧
         for (const auto& p : local_cloud.points) {
             double dist = std::sqrt(p.x*p.x + p.y*p.y + p.z*p.z);
             if (dist > max_range || dist < 0.1) continue;
-            int sx = cxm + (int)(p.y / max_range * range_px);
+            int sx = cxm - (int)(p.y / max_range * range_px);
             int sy = cym - (int)(p.x / max_range * range_px);
             if (sx < x || sx >= x + cw || sy < y || sy >= y + ch) continue;
             double t = (std::min)(1.0, dist / max_range);
@@ -247,10 +251,10 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
             SolidBrush pb(Color(200, r_c, g_c, b_c));
             g.FillEllipse(&pb, sx - 1, sy - 1, 3, 3);
         }
-        // 负障碍标记点 (base_link; 橙色 4px 大点 —— 坑/下行台阶边缘)
+        // 负障碍标记点 (base_link; 橙色 4px 大点 —— 坑/下行台阶边缘), 同样按地图视角修正左右
         for (const auto& p : local_neg.points) {
             if (p.x > max_range || p.x < 0.1) continue;
-            int sx = cxm + (int)(p.y / max_range * range_px);
+            int sx = cxm - (int)(p.y / max_range * range_px);
             int sy = cym - (int)(p.x / max_range * range_px);
             if (sx < x || sx >= x + cw || sy < y || sy >= y + ch) continue;
             SolidBrush nb(Color(255, 255, 120, 0));
@@ -596,12 +600,17 @@ int main(int argc, char** argv) {
     [[maybe_unused]] bool no_viz = false;
     bool show_cloud = false;
     bool ground_free = false;
+    double ground_h = 0.8;   // 手持相机离地高度 (米), --ground <h> 覆盖
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
         if (arg == "--real" || arg == "-r") use_real = true;
         if (arg == "--noviz") no_viz = true;
         if (arg == "--cloud" || arg == "-c") show_cloud = true;
-        if (arg == "--free") ground_free = true;  // 手持自由姿态: 放宽地面高度先验
+        if (arg == "--free") ground_free = true;  // 等价 --ground 0.8
+        if (arg == "--ground" && i + 1 < argc) {
+            ground_free = true;
+            ground_h = (std::max)(0.1, atof(argv[++i]));  // 括号包住: windows.h 的 max 宏冲突
+        }
     }
 
 #ifdef USE_ASTRA_SDK
@@ -654,10 +663,20 @@ int main(int argc, char** argv) {
         cloud_E.x = 0; cloud_E.y = 0; cloud_E.z = 0;
         cloud_E.roll = 0; cloud_E.pitch = 0; cloud_E.yaw = 0;
     }
-    // P1 地面分割参数: --free 手持自由姿态放宽高度先验带 (相机不在狗身上,
-    // 装高/俯角非标定值); 装机后去掉 --free, 用默认紧窗口
+    // P1 地面分割手持模式 (--ground <h> / --free): 外参归零使 base==link
+    // (可视化标记与点云同系对齐), 高度先验 = -h, 窗口收紧 —— "地面在哪"由真实
+    // 持机高度决定, 不让 RANSAC 在地板/床板/桌面之间跳 (宿舍实测踩过的坑)。
+    // 装机后: 去掉 --ground/--free, 用默认外参 + 紧窗口 (prior_window=0.10)。
     GroundSegParams gseg_params;
-    if (ground_free) gseg_params.prior_window = 1.5;
+    if (ground_free) {
+        cloud_E.x = 0; cloud_E.y = 0; cloud_E.z = 0;
+        cloud_E.roll = 0; cloud_E.pitch = 0; cloud_E.yaw = 0;
+        gseg_params.ground_prior_z = -ground_h;
+        gseg_params.prior_window = 0.12;
+        std::cout << "[P1] 手持模式: 相机离地 " << ground_h
+                  << "m, 地面先验 z=" << gseg_params.ground_prior_z
+                  << " (base==link)" << std::endl;
+    }
 
     unsigned int tick = 0;
     while (!g_stop.load()) {
