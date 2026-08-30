@@ -72,6 +72,13 @@ static bool g_view_side = false;
 // 共享负障碍点云 (P1, base_link 系地面平面高度处) + 平面锁定状态 (主循环写, 窗口线程读)
 static PointCloud g_neg_cloud;
 static bool g_plane_valid = false;
+// 诊断开关: 水平镜像深度图 (Astra 深度与 RGB 的左右关系存疑, 按 M 实测裁决)
+static std::atomic<bool> g_flip_depth{false};
+// 诊断开关: 深度热力图叠加 RGB (近=红 远=蓝; 对齐则热力落在实物上, 镜像则左右互换)
+static std::atomic<bool> g_heat_overlay{false};
+static std::vector<uint8_t> g_heat_bgr;   // BGR 混合图 (主循环写, 窗口线程读, g_viz_mutex)
+static int g_heat_w = 0, g_heat_h = 0;
+static bool g_heat_valid = false;
 
 // 可视化共享数据互斥锁 (主循环写 / 窗口线程读, 防数据竞争崩溃)
 static std::mutex g_viz_mutex;
@@ -196,7 +203,8 @@ static void draw_label_right_aligned(Gdiplus::Graphics& g, const wchar_t* text,
 // local_neg: P1 负障碍标记点 (base_link 系, 橙色大点); plane_valid: 地面平面是否锁定
 static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
                             const PointCloud& local_cloud, bool side_view,
-                            const PointCloud& local_neg, bool plane_valid) {
+                            const PointCloud& local_neg, bool plane_valid,
+                            bool depth_flipped) {
     using namespace Gdiplus;
     if (local_cloud.points.empty() || cw <= 0 || ch <= 0) return;
 
@@ -325,13 +333,14 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
     Pen line(Color(80, 255, 255, 255), 1);
     g.DrawLine(&line, x, y + ch - 56, x + cw, y + ch - 56);
 
-    wchar_t buf[192];
-    swprintf(buf, 192, L"POINT CLOUD  pts=%zu  frame=%s  seq=%llu  NEG=%zu%s",
+    wchar_t buf[256];
+    swprintf(buf, 256, L"POINT CLOUD  pts=%zu  frame=%s  seq=%llu  NEG=%zu%s%s",
              local_cloud.points.size(),
              widen(local_cloud.frame_id.c_str()).c_str(),
              (unsigned long long)local_cloud.seq,
              local_neg.points.size(),
-             plane_valid ? L"" : L"  [地面未锁定]");
+             plane_valid ? L"" : L"  [地面未锁定]",
+             depth_flipped ? L"  [深度已镜像M]" : L"");
     std::wstring status(buf);
     Gdiplus::PointF sp((REAL)(x + 12), (REAL)(y + ch - 52));
     g.DrawString(status.c_str(), -1, &font_big, sp, &white);
@@ -358,6 +367,10 @@ static void draw_scene(HDC hdc, int w, int h) {
     bool have_cloud = false;
     PointCloud local_neg;
     bool plane_valid = false;
+    const bool depth_flipped = g_flip_depth.load();
+    std::vector<uint8_t> local_heat;
+    int heat_w = 0, heat_h = 0;
+    bool heat_valid = false;
     {
         std::lock_guard<std::mutex> lock(g_viz_mutex);
         local_color = g_color_frame;
@@ -366,6 +379,22 @@ static void draw_scene(HDC hdc, int w, int h) {
         have_cloud = g_have_cloud;
         local_neg = g_neg_cloud;
         plane_valid = g_plane_valid;
+        local_heat = g_heat_bgr;
+        heat_w = g_heat_w; heat_h = g_heat_h;
+        heat_valid = g_heat_valid;
+    }
+
+    // ===== D 热力诊断模式: 深度热力图叠加 RGB (对齐裁决) =====
+    if (g_heat_overlay.load() && heat_valid && !local_heat.empty()) {
+        Bitmap heat_bmp(heat_w, heat_h, heat_w * 3, PixelFormat24bppRGB,
+                        local_heat.data());
+        g.DrawImage(&heat_bmp, Rect(0, 0, w, h), 0, 0, heat_w, heat_h, UnitPixel);
+        SolidBrush hb2(Color(255, 255, 220, 0));
+        g.DrawString(L"[D 热力诊断] 近=红 远=蓝  红点应落在实际近处物体上  按 D 关闭",
+                     -1, &font, PointF(10, 10), &hb2);
+        Graphics screen(hdc);
+        screen.DrawImage(&mem_bmp, 0, 0, w, h);
+        return;
     }
 
     bool color_ok = have_color && local_color.valid && !local_color.rgb.empty();
@@ -378,13 +407,13 @@ static void draw_scene(HDC hdc, int w, int h) {
             int half = w / 2;
             draw_color_frame(g, 0, 0, half, h, local_color);
             draw_cloud_view(g, half, 0, w - half, h, local_cloud, g_view_side,
-                            local_neg, plane_valid);
+                            local_neg, plane_valid, depth_flipped);
             Pen sep(Color(120, 255, 255, 255), 1);
             g.DrawLine(&sep, half, 0, half, h);
         } else if (cloud_ok) {
             // 仅有彩色帧时也要保证有点云可看 (否则退化全屏点云)
             draw_cloud_view(g, 0, 0, w, h, local_cloud, g_view_side,
-                            local_neg, plane_valid);
+                            local_neg, plane_valid, depth_flipped);
         } else if (color_ok) {
             // 点云尚未就绪, 暂退彩色帧
             draw_color_frame(g, 0, 0, w, h, local_color);
@@ -521,6 +550,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_KEYDOWN:
             // S: 切换点云侧视图/俯视图 (仅点云模式有效)
             if (wp == 'S' || wp == 's') g_view_side = !g_view_side;
+            // M: 深度图水平镜像开关 (左右方向诊断用)
+            if (wp == 'M' || wp == 'm') g_flip_depth.store(!g_flip_depth.load());
+            // D: 深度热力图叠加 RGB (深度/RGB 对齐裁决)
+            if (wp == 'D' || wp == 'd') g_heat_overlay.store(!g_heat_overlay.load());
             return 0;
         case WM_CLOSE:
             g_window_open = 0;
@@ -698,6 +731,14 @@ int main(int argc, char** argv) {
             AstraFrame frame = astra.get_latest_frame();
             if (frame.valid && !frame.depth_map.empty()
                 && frame.depth_width > 0 && frame.depth_height > 0) {
+                // 诊断: M 键切换的深度图水平镜像 (只影响本可视化的点云, 不影响融合)
+                if (g_flip_depth.load()) {
+                    const int fw = frame.depth_width, fh = frame.depth_height;
+                    for (int y = 0; y < fh; ++y) {
+                        std::reverse(frame.depth_map.begin() + (size_t)y * fw,
+                                     frame.depth_map.begin() + (size_t)(y + 1) * fw);
+                    }
+                }
                 PointCloud cloud_opt;
                 depth_to_cloud(frame.depth_map.data(),
                                frame.depth_width, frame.depth_height,
@@ -734,6 +775,42 @@ int main(int argc, char** argv) {
                 g_neg_cloud.frame_id = "base_link";
                 g_neg_cloud.points = std::move(seg.negative_points);
                 g_plane_valid = seg.plane.valid;
+            }
+
+            // D 诊断: 深度热力图混合 RGB —— 深度像素按距离着色(近红远蓝)后
+            // 半透明叠回彩色图。若热力红点落在实际近处物体上 → 深度与 RGB 对齐;
+            // 若红点出现在远处物体上 → 深度图相对 RGB 左右镜像, 需驱动层翻转。
+            if (g_heat_overlay.load()) {
+                ColorFrameData cf = astra.get_color_frame();
+                const int hw = frame.depth_width, hh = frame.depth_height;
+                std::vector<uint8_t> bgr((size_t)hw * hh * 3, 0);
+                const bool have_cf = cf.valid && cf.width == hw && cf.height == hh &&
+                                     cf.rgb.size() == cf.width * cf.height * 3;
+                for (int y = 0; y < hh; ++y) {
+                    for (int x = 0; x < hw; ++x) {
+                        const uint16_t d = frame.depth_map[(size_t)y * hw + x];
+                        uint8_t pr = 0, pg = 0, pb = 0;
+                        if (d > 0) {
+                            double t = (d / 1000.0 - 0.6) / (8.0 - 0.6);
+                            t = (std::min)(1.0, (std::max)(0.0, t));
+                            pr = (uint8_t)(255 * (1 - t));   // 近=红
+                            pg = 70;
+                            pb = (uint8_t)(255 * t);          // 远=蓝
+                        }
+                        const size_t o = ((size_t)y * hw + x) * 3;
+                        if (have_cf) {
+                            bgr[o]     = (uint8_t)(0.45 * pb + 0.55 * cf.rgb[o + 2]);
+                            bgr[o + 1] = (uint8_t)(0.45 * pg + 0.55 * cf.rgb[o + 1]);
+                            bgr[o + 2] = (uint8_t)(0.45 * pr + 0.55 * cf.rgb[o]);
+                        } else {
+                            bgr[o] = pb; bgr[o + 1] = pg; bgr[o + 2] = pr;
+                        }
+                    }
+                }
+                std::lock_guard<std::mutex> lock(g_viz_mutex);
+                g_heat_bgr = std::move(bgr);
+                g_heat_w = hw; g_heat_h = hh;
+                g_heat_valid = true;
             }
         }
 #endif
