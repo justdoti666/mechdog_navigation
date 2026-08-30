@@ -50,6 +50,7 @@ set(SOURCES
     sensor_fusion.cpp
     path_planner.cpp
     point_cloud.cpp
+    ground_segmentation.cpp
 )
 
 # 可执行文件
@@ -93,6 +94,13 @@ add_executable(test_point_cloud tests/test_point_cloud.cpp point_cloud.cpp)
 target_include_directories(test_point_cloud PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_point_cloud PRIVATE Threads::Threads)
 add_test(NAME point_cloud_tests COMMAND test_point_cloud)
+
+# 地面分割与负障碍单测 (P1): 合成场景, 含门口试金石 (T4)
+add_executable(test_ground_segmentation tests/test_ground_segmentation.cpp
+    ground_segmentation.cpp point_cloud.cpp)
+target_include_directories(test_ground_segmentation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_ground_segmentation PRIVATE Threads::Threads)
+add_test(NAME ground_segmentation_tests COMMAND test_ground_segmentation)
 
 # 安装
 install(TARGETS ${PROJECT_NAME} DESTINATION bin)

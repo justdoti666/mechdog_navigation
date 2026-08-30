@@ -166,4 +166,27 @@ struct IrConfig {
     static constexpr double ir_sim_max     = 0.90; // 模拟模式红外最大值 (参考)
 };
 
+// ============================================================
+// 地面分割与负障碍 (P1)
+// ============================================================
+// 分级策略: ① 受约束 RANSAC 拟合地面平面 ② 逐点分类 ③ 2.5D 栅格按列扫描判负障碍.
+// 负障碍判据 (试金石): 地面 → 无回波带 → 更低一截 才标; 门口/Free space 后方地面
+// 同高 → 不标 (tests/test_ground_segmentation.cpp T4).
+// 兜底: 底部 HC-SR04 (ALG-1, 声学独立保险) 与本模块双物理原理冗余, 互不依赖.
+// 实现见 ground_segmentation.h/.cpp.
+struct GroundSegConfig {
+    static constexpr double ground_prior_z     = -0.18; // 装机高度先验 (与 CameraExtrinsics::z 联动, 量测后两处同步)
+    static constexpr double prior_window       = 0.10;  // 平面高度接受半带宽 (手持实验可放宽到 ~1.0)
+    static constexpr double plane_max_tilt_deg = 15.0;  // 法向偏离竖直的容限 (更陡按障碍处理, 保守)
+    static constexpr double ransac_inlier_dist = 0.02;  // RANSAC 内点判定距离
+    static constexpr int    ransac_max_iters   = 200;
+    static constexpr double ransac_early_ratio = 0.55;  // 内点率达标提前退出
+    static constexpr double point_on_plane_eps = 0.02;  // 逐点分类阈值
+    static constexpr double cell_size          = MapConfig::grid_size_m; // 0.05, 与地图分辨率同源
+    static constexpr double cliff_drop_min     = 0.12;  // 判负障碍的最小落差 (下行台阶 15~20cm, 留余量; 底部超声 30cm 是紧急阈值, 语义不同勿混)
+    static constexpr double neg_near_m         = 0.6;   // 负障碍检测近界 (= Astra 盲区外沿)
+    static constexpr double neg_far_m          = 3.0;   // 负障碍检测远界 (近场定位, 更远交给雷达)
+    static constexpr int    min_gap_cells      = 1;     // 参考点到落差点最小间隔 cell 数 (1 = 落差即触发; 提高可滤噪)
+};
+
 } // namespace mechdog
