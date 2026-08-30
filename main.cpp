@@ -3,6 +3,7 @@
  *
  * 默认以模拟模式运行: 无需硬件, 在 PC 上即可验证传感器融合与导航决策全链路。
  * 真机模式: 通过 CMake 选项 USE_WIRINGPI / USE_ASTRA_SDK 编译, 并修改下方 use_simulated 参数。
+ * --free: 手持自由姿态实验 —— 放宽地面高度先验带 (相机不在狗身上, 装高/俯角非标定值); 装机后勿用。
  *
  * 构建 (Windows, 需要 GDI+):
  *   cmake -B build_vs -DCMAKE_CXX_STANDARD=17
@@ -18,6 +19,7 @@
 #include "sensor_fusion.h"
 #include "path_planner.h"
 #include "point_cloud.h"
+#include "ground_segmentation.h"
 
 #include <chrono>
 #include <csignal>
@@ -64,6 +66,9 @@ static bool g_have_cloud = false;
 static bool g_view_cloud = false;
 // 点云视图类型 (false=俯视图 TopView, true=侧视图 SideView; 按 S 切换)
 static bool g_view_side = false;
+// 共享负障碍点云 (P1, base_link 系地面平面高度处) + 平面锁定状态 (主循环写, 窗口线程读)
+static PointCloud g_neg_cloud;
+static bool g_plane_valid = false;
 
 // 可视化共享数据互斥锁 (主循环写 / 窗口线程读, 防数据竞争崩溃)
 static std::mutex g_viz_mutex;
@@ -185,8 +190,10 @@ static void draw_label_right_aligned(Gdiplus::Graphics& g, const wchar_t* text,
 }
 
 // 绘制点云到指定区域 (camera_link 系; side_view=false=俯视 X-Y, true=侧视 X-Z)
+// local_neg: P1 负障碍标记点 (base_link 系, 橙色大点); plane_valid: 地面平面是否锁定
 static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
-                            const PointCloud& local_cloud, bool side_view) {
+                            const PointCloud& local_cloud, bool side_view,
+                            const PointCloud& local_neg, bool plane_valid) {
     using namespace Gdiplus;
     if (local_cloud.points.empty() || cw <= 0 || ch <= 0) return;
 
@@ -240,6 +247,15 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
             SolidBrush pb(Color(200, r_c, g_c, b_c));
             g.FillEllipse(&pb, sx - 1, sy - 1, 3, 3);
         }
+        // 负障碍标记点 (base_link; 橙色 4px 大点 —— 坑/下行台阶边缘)
+        for (const auto& p : local_neg.points) {
+            if (p.x > max_range || p.x < 0.1) continue;
+            int sx = cxm + (int)(p.y / max_range * range_px);
+            int sy = cym - (int)(p.x / max_range * range_px);
+            if (sx < x || sx >= x + cw || sy < y || sy >= y + ch) continue;
+            SolidBrush nb(Color(255, 255, 120, 0));
+            g.FillEllipse(&nb, sx - 2, sy - 2, 5, 5);
+        }
         draw_label_right_aligned(g, L"Cloud TopView (link)", (REAL)(x + cw), (REAL)(y + 10), font, dim);
     } else {
         // ===== 侧视图: 前距离 X=右, 高度 Z=上 =====
@@ -276,6 +292,16 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
             SolidBrush pb(Color(200, r_c, g_c, b_c));
             g.FillEllipse(&pb, sx - 1, sy - 1, 3, 3);
         }
+        // 负障碍标记点 (侧视: 沿拟合地面分布的橙色点带 —— 坑/台阶沿)
+        for (const auto& p : local_neg.points) {
+            if (p.x > max_range || p.x < 0.05) continue;
+            if (std::abs(p.y) > max_range) continue;
+            int sx = cxm + (int)(p.x / max_range * range_px);
+            int sy = ground_y - (int)(p.z / z_max * (ch * 0.34));
+            if (sx < x || sx >= x + cw || sy < y || sy >= y + ch) continue;
+            SolidBrush nb(Color(255, 255, 120, 0));
+            g.FillEllipse(&nb, sx - 2, sy - 2, 5, 5);
+        }
         // 高度标尺
         for (double zm : {-2.0, -1.0, 1.0, 2.0}) {
             int sy = ground_y - (int)(zm / z_max * (ch * 0.34));
@@ -295,11 +321,13 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
     Pen line(Color(80, 255, 255, 255), 1);
     g.DrawLine(&line, x, y + ch - 56, x + cw, y + ch - 56);
 
-    wchar_t buf[128];
-    swprintf(buf, 128, L"POINT CLOUD  pts=%zu  frame=%s  seq=%llu",
+    wchar_t buf[192];
+    swprintf(buf, 192, L"POINT CLOUD  pts=%zu  frame=%s  seq=%llu  NEG=%zu%s",
              local_cloud.points.size(),
              widen(local_cloud.frame_id.c_str()).c_str(),
-             (unsigned long long)local_cloud.seq);
+             (unsigned long long)local_cloud.seq,
+             local_neg.points.size(),
+             plane_valid ? L"" : L"  [地面未锁定]");
     std::wstring status(buf);
     Gdiplus::PointF sp((REAL)(x + 12), (REAL)(y + ch - 52));
     g.DrawString(status.c_str(), -1, &font_big, sp, &white);
@@ -324,12 +352,16 @@ static void draw_scene(HDC hdc, int w, int h) {
     bool have_color = false;
     PointCloud local_cloud;
     bool have_cloud = false;
+    PointCloud local_neg;
+    bool plane_valid = false;
     {
         std::lock_guard<std::mutex> lock(g_viz_mutex);
         local_color = g_color_frame;
         have_color = g_have_color;
         local_cloud = g_latest_cloud;
         have_cloud = g_have_cloud;
+        local_neg = g_neg_cloud;
+        plane_valid = g_plane_valid;
     }
 
     bool color_ok = have_color && local_color.valid && !local_color.rgb.empty();
@@ -341,12 +373,14 @@ static void draw_scene(HDC hdc, int w, int h) {
             // 分屏: 左半彩色帧, 右半点云俯视图
             int half = w / 2;
             draw_color_frame(g, 0, 0, half, h, local_color);
-            draw_cloud_view(g, half, 0, w - half, h, local_cloud, g_view_side);
+            draw_cloud_view(g, half, 0, w - half, h, local_cloud, g_view_side,
+                            local_neg, plane_valid);
             Pen sep(Color(120, 255, 255, 255), 1);
             g.DrawLine(&sep, half, 0, half, h);
         } else if (cloud_ok) {
             // 仅有彩色帧时也要保证有点云可看 (否则退化全屏点云)
-            draw_cloud_view(g, 0, 0, w, h, local_cloud, g_view_side);
+            draw_cloud_view(g, 0, 0, w, h, local_cloud, g_view_side,
+                            local_neg, plane_valid);
         } else if (color_ok) {
             // 点云尚未就绪, 暂退彩色帧
             draw_color_frame(g, 0, 0, w, h, local_color);
@@ -561,11 +595,13 @@ int main(int argc, char** argv) {
     // maybe_unused: no_viz 仅 Windows 可视化链路 (_WIN32 块) 消费, Linux/gcc 下未用
     [[maybe_unused]] bool no_viz = false;
     bool show_cloud = false;
+    bool ground_free = false;
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
         if (arg == "--real" || arg == "-r") use_real = true;
         if (arg == "--noviz") no_viz = true;
         if (arg == "--cloud" || arg == "-c") show_cloud = true;
+        if (arg == "--free") ground_free = true;  // 手持自由姿态: 放宽地面高度先验
     }
 
 #ifdef USE_ASTRA_SDK
@@ -618,6 +654,10 @@ int main(int argc, char** argv) {
         cloud_E.x = 0; cloud_E.y = 0; cloud_E.z = 0;
         cloud_E.roll = 0; cloud_E.pitch = 0; cloud_E.yaw = 0;
     }
+    // P1 地面分割参数: --free 手持自由姿态放宽高度先验带 (相机不在狗身上,
+    // 装高/俯角非标定值); 装机后去掉 --free, 用默认紧窗口
+    GroundSegParams gseg_params;
+    if (ground_free) gseg_params.prior_window = 1.5;
 
     unsigned int tick = 0;
     while (!g_stop.load()) {
@@ -661,9 +701,20 @@ int main(int argc, char** argv) {
                     cloud_ds.points.push_back(cloud_link.points[i]);
                 }
 
+                // P1 负障碍: 降采样云 → base_link → 地面分割 (--free 手持放宽先验)
+                PointCloud cloud_base;
+                transform_to_base(cloud_ds, cloud_E, cloud_base);
+                GroundSegResult seg;
+                segment_ground(cloud_base, gseg_params, seg);
+
                 std::lock_guard<std::mutex> lock(g_viz_mutex);
                 g_latest_cloud = cloud_ds;
                 g_have_cloud = true;
+                g_neg_cloud.seq = cloud_ds.seq;
+                g_neg_cloud.stamp = cloud_ds.stamp;
+                g_neg_cloud.frame_id = "base_link";
+                g_neg_cloud.points = std::move(seg.negative_points);
+                g_plane_valid = seg.plane.valid;
             }
         }
 #endif
