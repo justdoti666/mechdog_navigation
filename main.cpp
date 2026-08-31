@@ -235,6 +235,12 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
         // 前方方向箭头
         Pen arrow(Color(120, 255, 255, 255), 2);
         g.DrawLine(&arrow, cxm, cym, cxm, cym - range_px - 30);
+        // 0.6m 近界警示环 (结构光最小有效距离; 环内深度像素全部置 0 —— 贴墙断崖可视化)
+        int r_near = (int)(range_px * (0.6 / max_range));
+        Pen near_pen(Color(160, 255, 60, 60), 1);
+        g.DrawEllipse(&near_pen, cxm - r_near, cym - r_near, r_near * 2, r_near * 2);
+        Gdiplus::PointF np((REAL)(cxm + r_near + 3), (REAL)(cym - 12));
+        g.DrawString(L"0.6m", -1, &font, np, &dim);
         // FOV 扇形边界 (水平 58.4°, 相机朝上)
         Pen fov_pen(Color(90, 100, 180, 255), 1);
         double fov_h = 58.4 * 3.14159265 / 180.0;
@@ -288,6 +294,14 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
         int ground_y = cym;   // z=0 → 屏幕 cy (link Z上为+)
         Pen ground(Color(90, 255, 255, 255), 1);
         g.DrawLine(&ground, x, ground_y, x + cw, ground_y);
+        // 0.6m 近界警示线 (结构光最小有效距离; 距离<0.6m 深度像素全部置 0)
+        {
+            int nx = cxm + (int)(0.6 / max_range * range_px);
+            Pen np2(Color(160, 255, 60, 60), 1);
+            g.DrawLine(&np2, nx, y, nx, y + ch - 56);
+            Gdiplus::PointF npt((REAL)(nx + 3), (REAL)(y + 24));
+            g.DrawString(L"0.6m", -1, &font, npt, &dim);
+        }
         // 相机位置标记
         SolidBrush cam(Color(255, 70, 130, 200));
         g.FillRectangle(&cam, cxm - 9, ground_y - 9, 18, 18);
