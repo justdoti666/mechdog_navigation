@@ -141,4 +141,15 @@ void transform_to_base(const PointCloud& in, const CameraExtrinsics& E,
     }
 }
 
+// 全帧有效深度像素计数 (600~8000mm 口径与 depth_to_cloud 一致; 可视化空态诊断数据源)
+size_t count_valid_pixels(const std::vector<uint16_t>& depth_map) {
+    const uint16_t lo = static_cast<uint16_t>(AstraProConfig::min_valid_mm);
+    const uint16_t hi = static_cast<uint16_t>(AstraProConfig::max_valid_mm);
+    size_t n = 0;
+    for (uint16_t v : depth_map) {
+        if (v >= lo && v <= hi) ++n;
+    }
+    return n;
+}
+
 } // namespace mechdog

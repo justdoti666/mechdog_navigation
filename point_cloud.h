@@ -79,6 +79,9 @@ struct CameraExtrinsics {
 void depth_to_cloud(const uint16_t* depth, int w, int h,
                     const CameraIntrinsics& K, PointCloud& out);
 
+// 全帧有效深度像素计数 (600~8000mm 口径与 depth_to_cloud 一致; 可视化空态诊断数据源)
+size_t count_valid_pixels(const std::vector<uint16_t>& depth_map);
+
 // ============================================================
 // camera_optical → camera_link 固定旋转 (§6.1)
 //
@@ -102,5 +105,4 @@ void transform_optical_to_link(const PointCloud& in, PointCloud& out);
 // ============================================================
 void transform_to_base(const PointCloud& in, const CameraExtrinsics& E,
                        PointCloud& out);
-
 } // namespace mechdog

@@ -419,6 +419,24 @@ static void test_metadata_preserved() {
     CHECK(approx(out_base.stamp, 12345.678));
 }
 
+// ============================================================
+// 测试 13: count_valid_pixels 全帧有效像素统计 (TDD, 空态诊断数据源)
+// ============================================================
+static void test_count_valid_pixels() {
+    // 全 0 (无效) → 0
+    std::vector<uint16_t> zero(64, 0);
+    CHECK(count_valid_pixels(zero) == 0);
+
+    // 边界/混合: 有效 = 600, 8000, 7999, 601, 1000 → 5 个
+    // (599 近界外, 8001 远界外, 0 无效)
+    std::vector<uint16_t> mixed = {0, 600, 8000, 7999, 601, 599, 8001, 1000};
+    CHECK(count_valid_pixels(mixed) == 5);
+
+    // 空向量 → 0
+    std::vector<uint16_t> empty;
+    CHECK(count_valid_pixels(empty) == 0);
+}
+
 int main() {
     test_backprojection_plane();
     test_intrinsics_center_pixel();
@@ -432,6 +450,7 @@ int main() {
     test_empty_cloud_transform();
     test_color_preserved();
     test_metadata_preserved();
+    test_count_valid_pixels();
 
     std::cout << "passed=" << g_passed << " failed=" << g_failed << std::endl;
     return g_failed == 0 ? 0 : 1;
