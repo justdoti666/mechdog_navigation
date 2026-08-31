@@ -83,6 +83,9 @@ static std::atomic<int>    g_frame_w{0}, g_frame_h{0};   // 最近一帧深度�
 // 帧率诊断: 主循环 tick 更新率 (EMA Hz) + 窗口一帧绘制耗时 (EMA ms), 状态栏显示
 static std::atomic<double> g_tick_hz{0.0};
 static std::atomic<double> g_draw_ms{0.0};
+// 窗口节流: 点云 seq 未变且距上次绘制 <80ms → 跳过陈旧重绘 (10Hz 定时 vs 数据更新率空转抑制)
+static uint64_t g_last_drawn_seq = 0;
+static std::chrono::steady_clock::time_point g_last_draw_t{};
 static std::vector<uint8_t> g_heat_bgr;   // BGR 混合图 (主循环写, 窗口线程读, g_viz_mutex)
 static int g_heat_w = 0, g_heat_h = 0;
 static bool g_heat_valid = false;
@@ -423,6 +426,12 @@ static void draw_scene_impl(HDC hdc, int w, int h) {
         heat_valid = g_heat_valid;
     }
 
+    // ===== 节流: 点云数据未更新且距上次绘制 <80ms → 整帧跳过 (陈旧重绘抑制) =====
+    if (g_view_cloud && have_cloud && local_cloud.seq == g_last_drawn_seq &&
+        std::chrono::steady_clock::now() - g_last_draw_t < std::chrono::milliseconds(80)) {
+        return;
+    }
+
     // ===== D 热力诊断模式: 深度热力图叠加 RGB (对齐裁决) =====
     if (g_heat_overlay.load() && heat_valid && !local_heat.empty()) {
         Bitmap heat_bmp(heat_w, heat_h, heat_w * 3, PixelFormat24bppRGB,
@@ -466,6 +475,8 @@ static void draw_scene_impl(HDC hdc, int w, int h) {
         // 一次性上屏 (双缓冲)
         Graphics screen(hdc);
         screen.DrawImage(&mem_bmp, 0, 0, w, h);
+        g_last_drawn_seq = local_cloud.seq;               // 节流记录 (仅点云模式比较)
+        g_last_draw_t = std::chrono::steady_clock::now();
         return;
     }
 
