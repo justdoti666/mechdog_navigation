@@ -795,11 +795,19 @@ int main(int argc, char** argv) {
                 // 三态诊断 0: 取帧失败 → 旧点云保留 (状态栏示警, 避免逐帧闪烁)
                 g_cloud_state.store(0);
             } else {
-                // 帧分辨率变化时打印一次 (验证 640×480 内参假定; 若真机非该分辨率 → 内参错位)
+                // 帧分辨率变化时打印一次 + 内参自适应: 真机深度流未设模式, SDK 默认 320×240
+                // (模拟帧 640×480), cloud_K 的 cx/cy/fx/fy 必须按帧宽高重算, 否则
+                // 反投影整体偏一个象限 (640 内参套 320 帧 → 点云全偏左半, 真机实测回归)
                 if (frame.depth_width != g_frame_w.load() ||
                     frame.depth_height != g_frame_h.load()) {
                     std::cout << "[viz] depth frame " << frame.depth_width << "x"
                               << frame.depth_height << std::endl;
+                    const double fx0 = cloud_K.fx * frame.depth_width / 640.0;
+                    const double fy0 = cloud_K.fy * frame.depth_height / 480.0;
+                    cloud_K.fx = fx0;
+                    cloud_K.fy = fy0;
+                    cloud_K.cx = frame.depth_width / 2.0;
+                    cloud_K.cy = frame.depth_height / 2.0;
                     g_frame_w.store(frame.depth_width);
                     g_frame_h.store(frame.depth_height);
                 }

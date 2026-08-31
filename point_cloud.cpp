@@ -162,7 +162,7 @@ const char* cloud_state_label(int state) {
     }
 }
 
-// 屏幕空间抽稀: 按俯视投影 (y,x)→2px 像素格去重, 格内保留首个点 (可视化专用, 纯显示层)
+// 屏幕空间抽稀: 按俯视投影 (y,x)→1px 像素格去重, 格内保留首个点 (可视化专用, 纯显示层)
 // px_per_m = 视图每米像素; 与 draw_cloud_view 的 sx/sy 映射 (sx∝y, sy∝x) 同口径
 void screen_decimate(const PointCloud& in, double px_per_m, PointCloud& out) {
     out.seq = in.seq;
@@ -170,7 +170,9 @@ void screen_decimate(const PointCloud& in, double px_per_m, PointCloud& out) {
     out.frame_id = in.frame_id;
     out.points.clear();
     if (px_per_m <= 0.0) return;   // 无视图缩放 → 保空 (防御)
-    constexpr int cell = 2;        // 2px 网格: 视觉等价, 38400 点 → 约 5000-9000 点
+    // 1px 格: 只合并"画在同一屏幕像素"的点 (视觉等价)。曾用 2px 格 → 7.3cm 格子,
+    // 把同面相邻点(间距 1.4~2.8cm)误合并, 近处点云清空、疏点露底 (真机实测回归)。
+    constexpr int cell = 1;
     std::unordered_set<int64_t> used;
     for (const auto& p : in.points) {
         // 与绘制裁剪同口径, 先粗滤 (视口外/近界不参与去重占位)
