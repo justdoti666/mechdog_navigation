@@ -874,7 +874,9 @@ int main(int argc, char** argv) {
                 ColorFrameData cf = astra.get_color_frame();
                 const int hw = frame.depth_width, hh = frame.depth_height;
                 std::vector<uint8_t> bgr((size_t)hw * hh * 3, 0);
-                const bool have_cf = cf.valid && cf.width == hw && cf.height == hh &&
+                // 深度帧(320x240)与彩色帧(640x480)分辨率不同 → 最近邻采样匹配再混合,
+                // 否则 have_cf 不满足退化为纯热力色块 (无 RGB 底, 对齐性无法目测)
+                const bool have_cf = cf.valid && cf.width > 0 && cf.height > 0 &&
                                      cf.rgb.size() == cf.width * cf.height * 3;
                 for (int y = 0; y < hh; ++y) {
                     for (int x = 0; x < hw; ++x) {
@@ -889,9 +891,12 @@ int main(int argc, char** argv) {
                         }
                         const size_t o = ((size_t)y * hw + x) * 3;
                         if (have_cf) {
-                            bgr[o]     = (uint8_t)(0.45 * pb + 0.55 * cf.rgb[o + 2]);
-                            bgr[o + 1] = (uint8_t)(0.45 * pg + 0.55 * cf.rgb[o + 1]);
-                            bgr[o + 2] = (uint8_t)(0.45 * pr + 0.55 * cf.rgb[o]);
+                            const int cyy = (std::min)(cf.height - 1, (y * cf.height) / hh);
+                            const int cxx = (std::min)(cf.width - 1, (x * cf.width) / hw);
+                            const size_t co = ((size_t)cyy * cf.width + cxx) * 3;
+                            bgr[o]     = (uint8_t)(0.45 * pb + 0.55 * cf.rgb[co + 2]);
+                            bgr[o + 1] = (uint8_t)(0.45 * pg + 0.55 * cf.rgb[co + 1]);
+                            bgr[o + 2] = (uint8_t)(0.45 * pr + 0.55 * cf.rgb[co]);
                         } else {
                             bgr[o] = pb; bgr[o + 1] = pg; bgr[o + 2] = pr;
                         }
