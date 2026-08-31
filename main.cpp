@@ -225,6 +225,11 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
     int range_px = (int)(ch * 0.34);
     double max_range = 8.0;
 
+    // 屏幕空间抽稀: 38400 点 → 2px 像素格去重 (~5000-9000 点), GDI+ 绘制量降 4-8x, 视觉等价
+    PointCloud sparse;
+    screen_decimate(local_cloud, range_px / max_range, sparse);
+    const auto& draw_pts = sparse.points;
+
     if (!side_view) {
         // ===== 俯视图: 前 X=上, 左 Y=右 =====
         // 同心圆 (1m/2m/4m/8m)
@@ -259,7 +264,7 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
 
         // 点云 (地图视角: X前=屏幕上, Y左=屏幕左) — 近=红, 远=蓝
         // 师兄实测发现左右镜像: camera_link +Y 指向机器人左方, 屏幕应画向左侧
-        for (const auto& p : local_cloud.points) {
+        for (const auto& p : draw_pts) {
             double dist = std::sqrt(p.x*p.x + p.y*p.y + p.z*p.z);
             if (dist > max_range || dist < 0.1) continue;
             int sx = cxm - (int)(p.y / max_range * range_px);
@@ -270,7 +275,7 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
             int g_c = (int)(200 * (1.0 - std::abs(t - 0.5) * 2.0));
             int b_c = (int)(255 * t);
             SolidBrush pb(Color(200, r_c, g_c, b_c));
-            g.FillEllipse(&pb, sx - 1, sy - 1, 3, 3);
+            g.FillEllipse(&pb, sx - 1, sy - 1, 2, 2);
         }
         // 负障碍标记点 (base_link; 橙色 4px 大点 —— 坑/下行台阶边缘), 同样按地图视角修正左右
         for (const auto& p : local_neg.points) {
@@ -310,7 +315,7 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
         g.FillRectangle(&cam, cxm - 9, ground_y - 9, 18, 18);
 
         // 点云 (X前=右, Z高=上) — 近=红, 远=蓝
-        for (const auto& p : local_cloud.points) {
+        for (const auto& p : draw_pts) {
             if (p.x > max_range || p.x < 0.05) continue;
             if (std::abs(p.y) > max_range) continue;
             double dist = std::sqrt(p.x*p.x + p.y*p.y + p.z*p.z);
@@ -323,7 +328,7 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
             int g_c = (int)(200 * (1.0 - std::abs(t - 0.5) * 2.0));
             int b_c = (int)(255 * t);
             SolidBrush pb(Color(200, r_c, g_c, b_c));
-            g.FillEllipse(&pb, sx - 1, sy - 1, 3, 3);
+            g.FillEllipse(&pb, sx - 1, sy - 1, 2, 2);
         }
         // 负障碍标记点 (侧视: 沿拟合地面分布的橙色点带 —— 坑/台阶沿)
         for (const auto& p : local_neg.points) {
