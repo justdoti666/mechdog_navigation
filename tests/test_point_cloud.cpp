@@ -452,6 +452,39 @@ static void test_cloud_state_label() {
     CHECK(std::strcmp(l0, l2) != 0);
 }
 
+// ============================================================
+// 测试 15: screen_decimate 屏幕空间抽稀 (TDD, 绘制量降 4-8x)
+// ============================================================
+static void test_screen_decimate() {
+    // 同格只保留 1 点: 3 点 y 差 0.001m, px_per_m=43 → 像素差 0.043px, 同一 2px 格
+    {
+        PointCloud in;
+        for (double dy : {0.0, 0.001, 0.002}) {
+            Point3D p; p.x = 1.0; p.y = 0.5 + dy; p.z = -0.8;
+            in.points.push_back(p);
+        }
+        PointCloud out;
+        screen_decimate(in, 43.0, out);
+        CHECK(out.points.size() == 1);
+        CHECK(out.seq == in.seq && out.frame_id == in.frame_id);  // 元数据保留
+    }
+    // 不同格保留: y 差 0.5m → 21.5px, 不同格
+    {
+        PointCloud in;
+        Point3D a; a.x = 1.0; a.y = 0.0; a.z = -0.8; in.points.push_back(a);
+        Point3D b; b.x = 1.0; b.y = 0.5; b.z = -0.8; in.points.push_back(b);
+        PointCloud out;
+        screen_decimate(in, 43.0, out);
+        CHECK(out.points.size() == 2);
+    }
+    // 空输入
+    {
+        PointCloud in, out;
+        screen_decimate(in, 43.0, out);
+        CHECK(out.points.empty());
+    }
+}
+
 int main() {
     test_backprojection_plane();
     test_intrinsics_center_pixel();
@@ -467,6 +500,7 @@ int main() {
     test_metadata_preserved();
     test_count_valid_pixels();
     test_cloud_state_label();
+    test_screen_decimate();
 
     std::cout << "passed=" << g_passed << " failed=" << g_failed << std::endl;
     return g_failed == 0 ? 0 : 1;

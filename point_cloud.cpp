@@ -10,6 +10,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <unordered_set>
 
 namespace mechdog {
 
@@ -158,6 +159,27 @@ const char* cloud_state_label(int state) {
         case 0: return "[无帧 取帧失败]";
         case 1: return "[深度无有效像素]";   // 近界<0.6m 或暗区/窗帘/门洞无回波
         default: return "[正常]";
+    }
+}
+
+// 屏幕空间抽稀: 按俯视投影 (y,x)→2px 像素格去重, 格内保留首个点 (可视化专用, 纯显示层)
+// px_per_m = 视图每米像素; 与 draw_cloud_view 的 sx/sy 映射 (sx∝y, sy∝x) 同口径
+void screen_decimate(const PointCloud& in, double px_per_m, PointCloud& out) {
+    out.seq = in.seq;
+    out.stamp = in.stamp;
+    out.frame_id = in.frame_id;
+    out.points.clear();
+    if (px_per_m <= 0.0) return;   // 无视图缩放 → 保空 (防御)
+    constexpr int cell = 2;        // 2px 网格: 视觉等价, 38400 点 → 约 5000-9000 点
+    std::unordered_set<int64_t> used;
+    for (const auto& p : in.points) {
+        // 与绘制裁剪同口径, 先粗滤 (视口外/近界不参与去重占位)
+        if (p.x <= 0.05 || p.x > 8.0) continue;
+        if (std::abs(p.y) > 8.0) continue;
+        const int gx = (int)std::floor(p.y * px_per_m / cell);
+        const int gy = (int)std::floor(p.x * px_per_m / cell);
+        const int64_t key = ((int64_t)gx << 32) ^ (gy & 0xFFFFFFFFll);
+        if (used.insert(key).second) out.points.push_back(p);
     }
 }
 

@@ -85,6 +85,10 @@ size_t count_valid_pixels(const std::vector<uint16_t>& depth_map);
 // 点云空态标签 (可视化状态栏): 0=无帧 1=深度全无有效像素 2=正常
 const char* cloud_state_label(int state);
 
+// 屏幕空间抽稀: 按俯视投影 (y,x)→2px 像素格去重, 格内保留首个点 (可视化专用, 纯显示层)
+// px_per_m = 视图每米像素; 与 draw_cloud_view 的 sx/sy 映射 (sx∝y, sy∝x) 同口径
+void screen_decimate(const PointCloud& in, double px_per_m, PointCloud& out);
+
 // ============================================================
 // camera_optical → camera_link 固定旋转 (§6.1)
 //
