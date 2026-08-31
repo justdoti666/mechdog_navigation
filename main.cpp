@@ -228,9 +228,9 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
     int range_px = (int)(ch * 0.34);
     double max_range = 8.0;
 
-    // 绘制点源: 点数少(真机典型 3-4k)时全量 3px 绘制 (视觉饱满, 同修复前基线);
-    // 点数多(模拟 38k)才抽稀 1px 格 + 2px 点 —— 保护绘制帧率同时保住真机观感
-    const bool dense = local_cloud.points.size() <= 8000;
+    // 绘制点源: 点数少(真机典型 4k-15k)时全量 3px 绘制 (视觉饱满, 同修复前基线);
+    // 点数巨多(模拟 38k)才抽稀 1px 格 + 2px 点 —— 保护绘制帧率同时保住真机观感
+    const bool dense = local_cloud.points.size() <= 20000;
     PointCloud sparse;
     if (!dense) {
         screen_decimate(local_cloud, range_px / max_range, sparse);
