@@ -911,19 +911,29 @@ int main(int argc, char** argv) {
 
         // 帧率诊断: tick 实际周期 + 分段耗时 (EMA 输出到状态栏)
         {
-            const double tick_ms = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - t0).count();
-            const double fuse_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            const double tick_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            const double fuse_ms = tick_ms;                    // 融合段 = t0→t1
             const double cloud_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
-            const double hz = tick_ms > 0.0 ? 1000.0 / tick_ms : 0.0;
-            const double ema = g_tick_hz.load();
-            g_tick_hz.store(ema <= 0.0 ? hz : 0.9 * ema + 0.1 * hz);
+            const double work_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t0).count();
             std::cout << "  [perf] fuse_ms=" << fuse_ms
                       << " cloud_ms=" << cloud_ms
-                      << " tick_ms=" << tick_ms
-                      << " hz=" << hz << std::endl;
+                      << " work_ms=" << work_ms << std::endl;
         }
 
+        ++tick;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        // 更新率 = 完整周期 (含 sleep) 的 EMA, 循环尾测量
+        {
+            const double full_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t0).count();
+            const double hz = full_ms > 0.0 ? 1000.0 / full_ms : 0.0;
+            const double ema = g_tick_hz.load();
+            g_tick_hz.store(ema <= 0.0 ? hz : 0.9 * ema + 0.1 * hz);
+        }
+
+        // 障碍物打印 (每 tick)
         for (const auto& kv : result.obstacles) {
             std::cout << "    " << kv.first
                       << ": " << std::setw(6) << kv.second.distance_m << "m"
@@ -933,9 +943,6 @@ int main(int argc, char** argv) {
                       << std::endl;
         }
         std::cout << std::endl;
-
-        ++tick;
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     astra.stop();
