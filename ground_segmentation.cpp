@@ -62,7 +62,8 @@ void segment_ground(const PointCloud& cloud, const GroundSegParams& p,
 
     const double cos_max_tilt = std::cos(p.plane_max_tilt_deg * kDegToRad);
     // 最少内点数: 过少的空间_patch不配叫"地面" (防止把 3 个孤立噪点拟合成平面)
-    const int min_inliers = std::max(30, n / 50);
+    // 内点域已收窄到候选集 (下方扫描), 基线随候选集规模同步, 保留"空间 patch 最小规模"语义
+    const int min_inliers = std::max(30, static_cast<int>(cand.size()) / 50);
 
     if (static_cast<int>(cand.size()) >= 3) {
         std::mt19937 rng(p.seed);
@@ -79,7 +80,7 @@ void segment_ground(const PointCloud& cloud, const GroundSegParams& p,
             if (std::abs(h0 - p.ground_prior_z) > p.prior_window) continue;  // 高度先验约束
 
             int inl = 0;
-            for (int i = 0; i < n; ++i) {
+            for (int i : cand) {   // 内点统计域: 全点 n → 候选集 (采样域=内点域, 语义一致, ~2x 提速)
                 const auto& q = pts[i];
                 if (std::abs(nx * q.x + ny * q.y + nz * q.z + d) <= p.ransac_inlier_dist) {
                     ++inl;
