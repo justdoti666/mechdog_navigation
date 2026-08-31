@@ -346,8 +346,20 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
              plane_valid ? L"" : L"  [地面未锁定]",
              depth_flipped ? L"  [深度已镜像M]" : L"");
     std::wstring status(buf);
-    Gdiplus::PointF sp((REAL)(x + 12), (REAL)(y + ch - 52));
+    Gdiplus::PointF sp((REAL)(x + 12), (REAL)(y + ch - 54));
     g.DrawString(status.c_str(), -1, &font_big, sp, &white);
+
+    // 第二行: 空态诊断 —— 有效像素数/比例 + 三态标签 (右缘截断修复: 状态信息不再
+    // 挤在第一行被窗口右缘裁掉, 无帧/深度全0/近界断崖可直接读出)
+    const int fw = g_frame_w.load(), fh = g_frame_h.load();
+    const double denom = (fw > 0 && fh > 0) ? (double)((size_t)fw * fh) : 1.0;
+    const size_t vpx = g_cloud_valid_px.load();
+    wchar_t buf2[192];
+    swprintf(buf2, 192, L"valid_px=%zu (%.0f%%)  %s",
+             vpx, 100.0 * vpx / denom,
+             widen(cloud_state_label(g_cloud_state.load())).c_str());
+    Gdiplus::PointF sp2((REAL)(x + 12), (REAL)(y + ch - 30));
+    g.DrawString(buf2, -1, &font, sp2, &dim);
 }
 
 // 窗口绘制 (双缓冲: 先在内存 Bitmap 画完整帧, 再一次性上屏, 消除闪烁)

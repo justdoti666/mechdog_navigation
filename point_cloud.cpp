@@ -152,4 +152,13 @@ size_t count_valid_pixels(const std::vector<uint16_t>& depth_map) {
     return n;
 }
 
+// 点云空态标签 (可视化状态栏): 0=无帧 1=深度全无有效像素 2=正常
+const char* cloud_state_label(int state) {
+    switch (state) {
+        case 0: return "[无帧 取帧失败]";
+        case 1: return "[深度无有效像素]";   // 近界<0.6m 或暗区/窗帘/门洞无回波
+        default: return "[正常]";
+    }
+}
+
 } // namespace mechdog

@@ -82,6 +82,9 @@ void depth_to_cloud(const uint16_t* depth, int w, int h,
 // 全帧有效深度像素计数 (600~8000mm 口径与 depth_to_cloud 一致; 可视化空态诊断数据源)
 size_t count_valid_pixels(const std::vector<uint16_t>& depth_map);
 
+// 点云空态标签 (可视化状态栏): 0=无帧 1=深度全无有效像素 2=正常
+const char* cloud_state_label(int state);
+
 // ============================================================
 // camera_optical → camera_link 固定旋转 (§6.1)
 //

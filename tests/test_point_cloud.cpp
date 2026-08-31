@@ -437,6 +437,21 @@ static void test_count_valid_pixels() {
     CHECK(count_valid_pixels(empty) == 0);
 }
 
+// ============================================================
+// 测试 14: cloud_state_label 三态标签 (TDD, 状态栏空态诊断)
+// ============================================================
+static void test_cloud_state_label() {
+    const char* l0 = cloud_state_label(0);
+    const char* l1 = cloud_state_label(1);
+    const char* l2 = cloud_state_label(2);
+    CHECK(l0 != nullptr && l0[0] != '\0');
+    CHECK(l1 != nullptr && l1[0] != '\0');
+    CHECK(l2 != nullptr && l2[0] != '\0');
+    CHECK(std::strcmp(l0, l1) != 0);   // 三态标签互不相同
+    CHECK(std::strcmp(l1, l2) != 0);
+    CHECK(std::strcmp(l0, l2) != 0);
+}
+
 int main() {
     test_backprojection_plane();
     test_intrinsics_center_pixel();
@@ -451,6 +466,7 @@ int main() {
     test_color_preserved();
     test_metadata_preserved();
     test_count_valid_pixels();
+    test_cloud_state_label();
 
     std::cout << "passed=" << g_passed << " failed=" << g_failed << std::endl;
     return g_failed == 0 ? 0 : 1;
