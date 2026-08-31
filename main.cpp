@@ -76,6 +76,10 @@ static bool g_plane_valid = false;
 static std::atomic<bool> g_flip_depth{false};
 // 诊断开关: 深度热力图叠加 RGB (近=红 远=蓝; 对齐则热力落在实物上, 镜像则左右互换)
 static std::atomic<bool> g_heat_overlay{false};
+// 点云空态诊断: 0=无帧(取帧失败, 旧点云保留) 1=有帧但有效像素=0(近界/无回波) 2=正常
+static std::atomic<int>    g_cloud_state{2};
+static std::atomic<size_t> g_cloud_valid_px{0};
+static std::atomic<int>    g_frame_w{0}, g_frame_h{0};   // 最近一帧深度分辨率 (诊断打印)
 static std::vector<uint8_t> g_heat_bgr;   // BGR 混合图 (主循环写, 窗口线程读, g_viz_mutex)
 static int g_heat_w = 0, g_heat_h = 0;
 static bool g_heat_valid = false;
@@ -729,6 +733,21 @@ int main(int argc, char** argv) {
         // 点云模式: 从最新深度帧反投影 → optical→link → 存共享
         if (show_cloud) {
             AstraFrame frame = astra.get_latest_frame();
+            if (!frame.valid) {
+                // 三态诊断 0: 取帧失败 → 旧点云保留 (状态栏示警, 避免逐帧闪烁)
+                g_cloud_state.store(0);
+            } else {
+                // 帧分辨率变化时打印一次 (验证 640×480 内参假定; 若真机非该分辨率 → 内参错位)
+                if (frame.depth_width != g_frame_w.load() ||
+                    frame.depth_height != g_frame_h.load()) {
+                    std::cout << "[viz] depth frame " << frame.depth_width << "x"
+                              << frame.depth_height << std::endl;
+                    g_frame_w.store(frame.depth_width);
+                    g_frame_h.store(frame.depth_height);
+                }
+                g_cloud_valid_px.store(count_valid_pixels(frame.depth_map));
+                g_cloud_state.store(g_cloud_valid_px.load() == 0 ? 1 : 2);
+            }
             if (frame.valid && !frame.depth_map.empty()
                 && frame.depth_width > 0 && frame.depth_height > 0) {
                 // 诊断: M 键切换的深度图水平镜像 (只影响本可视化的点云, 不影响融合)
