@@ -80,6 +80,9 @@ static std::atomic<bool> g_heat_overlay{false};
 static std::atomic<int>    g_cloud_state{2};
 static std::atomic<size_t> g_cloud_valid_px{0};
 static std::atomic<int>    g_frame_w{0}, g_frame_h{0};   // 最近一帧深度分辨率 (诊断打印)
+// 帧率诊断: 主循环 tick 更新率 (EMA Hz) + 窗口一帧绘制耗时 (EMA ms), 状态栏显示
+static std::atomic<double> g_tick_hz{0.0};
+static std::atomic<double> g_draw_ms{0.0};
 static std::vector<uint8_t> g_heat_bgr;   // BGR 混合图 (主循环写, 窗口线程读, g_viz_mutex)
 static int g_heat_w = 0, g_heat_h = 0;
 static bool g_heat_valid = false;
@@ -368,16 +371,17 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
     const int fw = g_frame_w.load(), fh = g_frame_h.load();
     const double denom = (fw > 0 && fh > 0) ? (double)((size_t)fw * fh) : 1.0;
     const size_t vpx = g_cloud_valid_px.load();
-    wchar_t buf2[192];
-    swprintf(buf2, 192, L"valid_px=%zu (%.0f%%)  %s",
+    wchar_t buf2[256];
+    swprintf(buf2, 256, L"valid_px=%zu (%.0f%%)  %s  viz:%.1fms/tick:%.1fHz",
              vpx, 100.0 * vpx / denom,
-             widen(cloud_state_label(g_cloud_state.load())).c_str());
+             widen(cloud_state_label(g_cloud_state.load())).c_str(),
+             g_draw_ms.load(), g_tick_hz.load());
     Gdiplus::PointF sp2((REAL)(x + 12), (REAL)(y + ch - 30));
     g.DrawString(buf2, -1, &font, sp2, &dim);
 }
 
 // 窗口绘制 (双缓冲: 先在内存 Bitmap 画完整帧, 再一次性上屏, 消除闪烁)
-static void draw_scene(HDC hdc, int w, int h) {
+static void draw_scene_impl(HDC hdc, int w, int h) {
     using namespace Gdiplus;
     // 内存缓冲 (防止逐笔绘制导致闪烁)
     Bitmap mem_bmp(w, h, PixelFormat32bppARGB);
@@ -565,6 +569,16 @@ static void draw_scene(HDC hdc, int w, int h) {
     screen.DrawImage(&mem_bmp, 0, 0, w, h);
 }
 
+// 计时包装: 记录单帧绘制耗时 (EMA → 状态栏 viz 行)
+static void draw_scene(HDC hdc, int w, int h) {
+    const auto d0 = std::chrono::steady_clock::now();
+    draw_scene_impl(hdc, w, h);
+    const double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - d0).count();
+    const double ema = g_draw_ms.load();
+    g_draw_ms.store(ema <= 0.0 ? ms : 0.9 * ema + 0.1 * ms);
+}
+
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_PAINT: {
@@ -743,7 +757,9 @@ int main(int argc, char** argv) {
 
     unsigned int tick = 0;
     while (!g_stop.load()) {
+        const auto t0 = std::chrono::steady_clock::now();
         auto result = fusion.fuse();
+        const auto t1 = std::chrono::steady_clock::now();
 
         auto cmd = planner.plan(result);
 
@@ -859,6 +875,7 @@ int main(int argc, char** argv) {
             }
         }
 #endif
+        const auto t2 = std::chrono::steady_clock::now();   // 点云管线耗时 (仅 --cloud 时有增量)
 
         std::cout << "[" << std::fixed << std::setprecision(2)
                   << result.timestamp << "] tick=" << tick
@@ -875,6 +892,21 @@ int main(int argc, char** argv) {
                   << (show_cloud ? " cloud_pts=" + std::to_string(g_latest_cloud.points.size()) : "")
 #endif
                   << std::endl;
+
+        // 帧率诊断: tick 实际周期 + 分段耗时 (EMA 输出到状态栏)
+        {
+            const double tick_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t0).count();
+            const double fuse_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            const double cloud_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+            const double hz = tick_ms > 0.0 ? 1000.0 / tick_ms : 0.0;
+            const double ema = g_tick_hz.load();
+            g_tick_hz.store(ema <= 0.0 ? hz : 0.9 * ema + 0.1 * hz);
+            std::cout << "  [perf] fuse_ms=" << fuse_ms
+                      << " cloud_ms=" << cloud_ms
+                      << " tick_ms=" << tick_ms
+                      << " hz=" << hz << std::endl;
+        }
 
         for (const auto& kv : result.obstacles) {
             std::cout << "    " << kv.first
