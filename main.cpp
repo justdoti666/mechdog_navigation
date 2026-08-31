@@ -228,10 +228,15 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
     int range_px = (int)(ch * 0.34);
     double max_range = 8.0;
 
-    // 屏幕空间抽稀: 38400 点 → 2px 像素格去重 (~5000-9000 点), GDI+ 绘制量降 4-8x, 视觉等价
+    // 绘制点源: 点数少(真机典型 3-4k)时全量 3px 绘制 (视觉饱满, 同修复前基线);
+    // 点数多(模拟 38k)才抽稀 1px 格 + 2px 点 —— 保护绘制帧率同时保住真机观感
+    const bool dense = local_cloud.points.size() <= 8000;
     PointCloud sparse;
-    screen_decimate(local_cloud, range_px / max_range, sparse);
-    const auto& draw_pts = sparse.points;
+    if (!dense) {
+        screen_decimate(local_cloud, range_px / max_range, sparse);
+    }
+    const auto& draw_pts = dense ? local_cloud.points : sparse.points;
+    const int DOT = dense ? 3 : 2;
 
     if (!side_view) {
         // ===== 俯视图: 前 X=上, 左 Y=右 =====
@@ -278,7 +283,7 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
             int g_c = (int)(200 * (1.0 - std::abs(t - 0.5) * 2.0));
             int b_c = (int)(255 * t);
             SolidBrush pb(Color(200, r_c, g_c, b_c));
-            g.FillEllipse(&pb, sx - 1, sy - 1, 2, 2);
+            g.FillEllipse(&pb, sx - 1, sy - 1, DOT, DOT);
         }
         // 负障碍标记点 (base_link; 橙色 4px 大点 —— 坑/下行台阶边缘), 同样按地图视角修正左右
         for (const auto& p : local_neg.points) {
@@ -331,7 +336,7 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
             int g_c = (int)(200 * (1.0 - std::abs(t - 0.5) * 2.0));
             int b_c = (int)(255 * t);
             SolidBrush pb(Color(200, r_c, g_c, b_c));
-            g.FillEllipse(&pb, sx - 1, sy - 1, 2, 2);
+            g.FillEllipse(&pb, sx - 1, sy - 1, DOT, DOT);
         }
         // 负障碍标记点 (侧视: 沿拟合地面分布的橙色点带 —— 坑/台阶沿)
         for (const auto& p : local_neg.points) {
