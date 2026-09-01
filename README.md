@@ -43,10 +43,13 @@
 | 传感器融合 | `sensor_fusion.h/.cpp` | 分层加权融合、环境自适应、障碍物分类、导航决策 |
 | 点云模块 | `point_cloud.h/.cpp` | 深度图→3D 点云反投影、光学系→link 系坐标变换（P0，供规划/建图预留，独立于融合层） |
 | 地面分割 | `ground_segmentation.h/.cpp` | 受约束 RANSAC 地面平面 + 2.5D 栅格**负障碍检测**（坑/下行台阶，P1；门口试金石单测锁定） |
+| 建图模块 | `mapping.h/.cpp` | 位姿驱动点云累积 → log-odds 占据栅格 + 光线空闲 + 膨胀 + PGM 导出（P4） |
 | 路径规划 | `path_planner.h/.cpp` | 导航动作 -> 速度指令映射（DWA 待实现） |
 | 单元测试 | `tests/test_fusion.cpp` | F4/F5 回归 + 融合逻辑验证 (`ctest`) |
 | 点云单测 | `tests/test_point_cloud.cpp` | 反投影/坐标变换/失效哨兵验证 (`ctest`，P0) |
 | 地面分割单测 | `tests/test_ground_segmentation.cpp` | 平地/坑/台阶/门口试金石/倾斜/退化输入 (`ctest`，P1) |
+| 建图单测 | `tests/test_mapping.cpp` | 坐标换算/占空判定/位姿变换/多帧累积/动态清障/膨胀/PGM (`ctest`，P4，40 断言) |
+| 真机建图工具 | `tools/mapping_real_test.cpp` | Windows 真机验证工具：Astra 真深度→全管线→PGM（静止校验 + 旋转扫描模式） |
 
 ## 点云模块（P0）
 
@@ -92,6 +95,63 @@ void transform_to_base(const PointCloud& in, const CameraExtrinsics& E,
 ```
 
 窗口内按 `S` 键在**俯视图**（前=上、左=右）与**侧视图**（前距=右、高度=上）之间切换，用于验证反投影与轴约定。`--cloud` 需与 `--real` 配合（真机深度图）；模拟模式也可运行（`--cloud` 不带 `--real`），但模拟帧只有"正前方起伏墙"，主要验证链路。
+
+## 建图模块（P4）
+
+位姿驱动的点云累积建图，把 P0 的 base 系点云升级为**世界系占据栅格地图**（`docs/POINT_CLOUD_DESIGN.md` P4 设计）。核心回答一个问题：*"机器人在哪、看到了什么 → 这间屋子长什么样"*。
+
+### 建图链路
+
+```
+深度图 (Astra 真机/合成)
+  → depth_to_cloud        (P0 反投影, camera_optical 系)
+  → transform_to_base     (P0 外参变换, base_link 系)
+  → insert_cloud(云, 位姿) (P4: base→odom 旋转平移 + 光线空闲 + log-odds 占据)
+  → OccupancyGrid 200x200 @ 5cm (10x10m, 复用 MapConfig)
+  → save_pgm / nav_msgs/OccupancyGrid
+```
+
+### 核心机制
+
+| 机制 | 实现 | 说明 |
+|------|------|------|
+| 占据更新 | log-odds（±6，钳位 ±20，阈值 ±4） | 多帧投票，单帧噪声不会翻转状态 |
+| 空闲标记 | 相机原点→命中点光线步进（步长 2.5cm，限 5m） | 走廊打通 + **动态清障**（障碍移走后光线穿过即清除） |
+| 障碍膨胀 | 圆形核（默认 0.15m，`MapConfig::inflation_radius_m`） | 供规划器消费的 costmap 语义 |
+| 地图导出 | PGM (P2, ROS map_server 惯例: 0=占据/254=空闲/205=未知) | `nav2 map_server` 可直接加载 |
+
+### 核心接口
+
+```cpp
+mechdog::OccupancyGridMap map(/*robot_radius=*/0.25);
+map.insert_cloud(cloud_base, /*Pose2D*/ {x, y, theta});  // 位姿来自 odom/SLAM
+map.inflate();          // 可选: 规划前膨胀
+map.save_pgm("map.pgm");
+```
+
+`Pose2D` 由 ROS 层从 `nav_msgs/Odometry` 提取——算法库零 ROS 依赖，单测全部离线可跑（40 断言：坐标换算/空帧安全/占空判定/位姿变换/多帧累积/动态清障/膨胀/PGM）。
+
+### 真机建图验证（Windows 工具）
+
+```bash
+# MSVC 真机构建 (USE_ASTRA_SDK=ON) 后:
+tools/build_real.bat
+
+# 静止模式: 100 帧室内扫描, 占据点距离分布自动校验 (0.55~5.5m > 95%)
+build_real/Release/mapping_real_test.exe 100 map_real.pgm
+
+# 旋转扫描模式: 5 秒倒计时后匀速向左转 360° (~17s)
+#   航向为匀速假设 (无 IMU/odom), demo 精度非测量
+build_real/Release/mapping_real_test.exe 150 map_sweep.pgm 360 5
+```
+
+真机实测（2026-09）：静止 100 帧 100% 有效 + 距离校验 PASS；手持 360° 扫描成图。对照实验（静止输入误标旋转 → 90° 周期鬼影环；真旋转 → 非均匀真实墙环）验证了**管线对位姿输入的忠实性**——位姿错，地图立刻伪。
+
+### 已知边界（P4 范围）
+
+- 单次累积无回环校正：cmd_vel 开环积分 odom 长距离会漂移（10m 场地内可接受）
+- 地面点未过滤：P1 地面分割结果尚未接入建图入口（接入后可消除地面假占据）
+- 10×10m 固定窗口（`MapConfig`），大场地需参数化
 
 ## 传感器融合策略
 
