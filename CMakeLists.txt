@@ -108,6 +108,19 @@ target_include_directories(test_mapping PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_mapping PRIVATE Threads::Threads)
 add_test(NAME mapping_tests COMMAND test_mapping)
 
+# 真机建图验证工具 (P4, 仅 USE_ASTRA_SDK 模式编译, Windows 侧运行)
+if(USE_ASTRA_SDK)
+    add_executable(mapping_real_test tools/mapping_real_test.cpp
+        sensor_astra.cpp point_cloud.cpp mapping.cpp)
+    target_include_directories(mapping_real_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(mapping_real_test PRIVATE USE_ASTRA_SDK)
+    target_include_directories(mapping_real_test PRIVATE "${ASTRA_SDK_ROOT}/include")
+    target_link_directories(mapping_real_test PRIVATE "${ASTRA_SDK_ROOT}/lib")
+    target_link_libraries(mapping_real_test astra_core astra_core_api astra)
+    target_compile_features(mapping_real_test PRIVATE cxx_std_20)
+    install(TARGETS mapping_real_test DESTINATION bin)
+endif()
+
 # 安装
 install(TARGETS ${PROJECT_NAME} DESTINATION bin)
 install(FILES config.h DESTINATION include/${PROJECT_NAME})
