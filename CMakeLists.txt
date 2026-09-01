@@ -54,7 +54,7 @@ set(SOURCES
 )
 
 # 可执行文件
-add_executable(${PROJECT_NAME} ${SOURCES})
+add_executable(${PROJECT_NAME} ${SOURCES} mapping.cpp)
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
@@ -101,6 +101,12 @@ add_executable(test_ground_segmentation tests/test_ground_segmentation.cpp
 target_include_directories(test_ground_segmentation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_ground_segmentation PRIVATE Threads::Threads)
 add_test(NAME ground_segmentation_tests COMMAND test_ground_segmentation)
+
+# 建图模块单测 (P4, 设计文档 docs/POINT_CLOUD_DESIGN.md P4)
+add_executable(test_mapping tests/test_mapping.cpp point_cloud.cpp mapping.cpp)
+target_include_directories(test_mapping PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_mapping PRIVATE Threads::Threads)
+add_test(NAME mapping_tests COMMAND test_mapping)
 
 # 安装
 install(TARGETS ${PROJECT_NAME} DESTINATION bin)
