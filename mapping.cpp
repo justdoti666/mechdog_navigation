@@ -30,15 +30,23 @@ inline void rotate_2d(double x, double y, double theta,
 // OccupancyGridMap
 // ============================================================
 
-OccupancyGridMap::OccupancyGridMap(double robot_radius_m,
-                                   double extrinsics_x_m)
+OccupancyGridMap::OccupancyGridMap(const MapConfig& /*cfg*/,
+                                   double robot_radius_m,
+                                   double extrinsics_x_m,
+                                   double width_m, double height_m,
+                                   double resolution_m)
     : robot_radius_m_(robot_radius_m),
-      extrinsics_x_m_(extrinsics_x_m) {
-    const int dim = dim_cells_();
-    width_ = dim;
-    height_ = dim;
-    grid_.assign(static_cast<size_t>(dim) * dim, 0); // 0 = 未知
-    inflated_.assign(static_cast<size_t>(dim) * dim, 0);
+      extrinsics_x_m_(extrinsics_x_m),
+      resolution_m_(resolution_m > 1e-6 ? resolution_m
+                                        : MapConfig::grid_size_m) {
+    width_  = std::max(2, static_cast<int>(
+        std::lround(width_m / resolution_m_)) & ~1);   // 偶数格, 原点居中
+    height_ = std::max(2, static_cast<int>(
+        std::lround(height_m / resolution_m_)) & ~1);
+    const size_t n = static_cast<size_t>(width_) * height_;
+    grid_.assign(n, 0);       // 0 = 未知
+    inflated_.assign(n, 0);
+    negative_.assign(n, 0);
 }
 
 // ------------------------------------------------------------
@@ -80,6 +88,8 @@ void OccupancyGridMap::insert_cloud(const PointCloud& cloud_base,
         if (world_to_index(wx, wy, col, row))
             hit_cells.push_back(static_cast<int>(
                 static_cast<size_t>(row) * width_ + col));
+        else
+            ++dropped_points_;   // FIX_PLAN #6: 越界计数, 不静默
     }
     std::vector<int> hit_set = hit_cells;
     std::sort(hit_set.begin(), hit_set.end());
@@ -112,8 +122,41 @@ void OccupancyGridMap::insert_cloud(const PointCloud& cloud_base,
     }
 }
 
+void OccupancyGridMap::insert_cloud_filtered(const PointCloud& cloud_base,
+                                             const Pose2D& robot_pose) {
+    if (cloud_base.points.empty()) return;
+
+    // FIX_PLAN #1: 地面分割 — 障碍/地面/负障碍三分离
+    GroundSegParams gp{};
+    GroundSegResult seg;
+    segment_ground(cloud_base, gp, seg);
+
+    // 障碍点 → 普通占据管线
+    PointCloud obstacles;
+    obstacles.frame_id = cloud_base.frame_id;
+    obstacles.stamp = cloud_base.stamp;
+    obstacles.points.reserve(seg.obstacle_indices.size());
+    for (int i : seg.obstacle_indices)
+        obstacles.points.push_back(cloud_base.points[i]);
+    insert_cloud(obstacles, robot_pose);
+
+    // FIX_PLAN #9: 负障碍点 → 独立标记层 (不参与占据/光线)
+    for (const auto& np : seg.negative_points) {
+        double wx, wy;
+        rotate_2d(np.x, np.y, robot_pose.theta, wx, wy);
+        wx += robot_pose.x;
+        wy += robot_pose.y;
+        int col, row;
+        if (world_to_index(wx, wy, col, row))
+            negative_[static_cast<size_t>(row) * width_ + col] = 1;
+        else
+            ++dropped_points_;
+    }
+    // 地面点: 丢弃 (消除假墙)
+}
+
 void OccupancyGridMap::inflate(double radius_m) {
-    const double res = MapConfig::grid_size_m;
+    const double res = resolution_m_;
     const int r_cells = static_cast<int>(
         std::lround(radius_m / res));
     if (r_cells <= 0) return;
@@ -182,11 +225,13 @@ int OccupancyGridMap::count_cells(int state) const {
 }
 
 std::string OccupancyGridMap::stats() const {
-    char buf[160];
+    char buf[200];
     std::snprintf(buf, sizeof(buf),
-        "map %dx%d res=%.2fm  unknown=%d free=%d occ=%d",
-        width_, height_, MapConfig::grid_size_m,
-        count_cells(-1), count_cells(0), count_cells(100));
+        "map %dx%d res=%.2fm  unknown=%d free=%d occ=%d neg=%ld dropped=%ld",
+        width_, height_, resolution_m_,
+        count_cells(-1), count_cells(0), count_cells(100),
+        std::count(negative_.begin(), negative_.end(), 1),
+        dropped_points_);
     return std::string(buf);
 }
 
@@ -236,9 +281,9 @@ bool OccupancyGridMap::save_nav2_map(const std::string& base_path) const {
         "negate: 0\n"
         "occupied_thresh: 0.65\n"
         "free_thresh: 0.20\n",
-        pgm.c_str(), MapConfig::grid_size_m,
-        -MapConfig::map_width_m * 0.5,
-        -MapConfig::map_height_m * 0.5);
+        pgm.c_str(), resolution_m_,
+        -(width_ * resolution_m_) * 0.5,
+        -(height_ * resolution_m_) * 0.5);
     std::fclose(y);
     return true;
 }

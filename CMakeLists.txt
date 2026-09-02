@@ -53,22 +53,24 @@ set(SOURCES
     ground_segmentation.cpp
 )
 
-# 可执行文件
-add_executable(${PROJECT_NAME} ${SOURCES} mapping.cpp)
+# 可执行文件 (主程序为 Windows GDI+ 可视化, Linux 下不构建 —
+# main.cpp 大段 #ifdef _WIN32, WSL/g++ 编译报 g_tick_hz 未声明, viz 批遗留)
+if(WIN32)
+    add_executable(${PROJECT_NAME} ${SOURCES} mapping.cpp)
+    target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    if(USE_WIRINGPI)
+        target_link_libraries(${PROJECT_NAME} PRIVATE ${WIRINGPI_LIB})
+    endif()
 
-if(USE_WIRINGPI)
-    target_link_libraries(${PROJECT_NAME} PRIVATE ${WIRINGPI_LIB})
-endif()
+    target_link_libraries(${PROJECT_NAME} PRIVATE Threads::Threads)
 
-target_link_libraries(${PROJECT_NAME} PRIVATE Threads::Threads)
-
-if(USE_ASTRA_SDK)
-    # 链接三个库: astra_core / astra_core_api / astra (Windows MSVC 实测需要)
-    target_include_directories(${PROJECT_NAME} PRIVATE "${ASTRA_SDK_ROOT}/include")
-    target_link_directories(${PROJECT_NAME} PRIVATE "${ASTRA_SDK_ROOT}/lib")
-    target_link_libraries(${PROJECT_NAME} PRIVATE astra_core astra_core_api astra)
+    if(USE_ASTRA_SDK)
+        # 链接三个库: astra_core / astra_core_api / astra (Windows MSVC 实测需要)
+        target_include_directories(${PROJECT_NAME} PRIVATE "${ASTRA_SDK_ROOT}/include")
+        target_link_directories(${PROJECT_NAME} PRIVATE "${ASTRA_SDK_ROOT}/lib")
+        target_link_libraries(${PROJECT_NAME} PRIVATE astra_core astra_core_api astra)
+    endif()
 endif()
 
 # 模拟模式（Windows/PC开发）
@@ -103,7 +105,9 @@ target_link_libraries(test_ground_segmentation PRIVATE Threads::Threads)
 add_test(NAME ground_segmentation_tests COMMAND test_ground_segmentation)
 
 # 建图模块单测 (P4, 设计文档 docs/POINT_CLOUD_DESIGN.md P4)
-add_executable(test_mapping tests/test_mapping.cpp point_cloud.cpp mapping.cpp)
+# ground_segmentation: FIX_PLAN #1 insert_cloud_filtered 依赖
+add_executable(test_mapping tests/test_mapping.cpp
+    point_cloud.cpp mapping.cpp ground_segmentation.cpp)
 target_include_directories(test_mapping PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_mapping PRIVATE Threads::Threads)
 add_test(NAME mapping_tests COMMAND test_mapping)
@@ -121,6 +125,8 @@ if(USE_ASTRA_SDK)
     install(TARGETS mapping_real_test DESTINATION bin)
 endif()
 
-# 安装
-install(TARGETS ${PROJECT_NAME} DESTINATION bin)
+# 安装 (主程序仅 Windows 构建, 见上方 if(WIN32) 守卫)
+if(WIN32)
+    install(TARGETS ${PROJECT_NAME} DESTINATION bin)
+endif()
 install(FILES config.h DESTINATION include/${PROJECT_NAME})
