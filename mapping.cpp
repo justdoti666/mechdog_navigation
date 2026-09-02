@@ -30,8 +30,10 @@ inline void rotate_2d(double x, double y, double theta,
 // OccupancyGridMap
 // ============================================================
 
-OccupancyGridMap::OccupancyGridMap(double robot_radius_m)
-    : robot_radius_m_(robot_radius_m) {
+OccupancyGridMap::OccupancyGridMap(double robot_radius_m,
+                                   double extrinsics_x_m)
+    : robot_radius_m_(robot_radius_m),
+      extrinsics_x_m_(extrinsics_x_m) {
     const int dim = dim_cells_();
     width_ = dim;
     height_ = dim;
@@ -40,11 +42,13 @@ OccupancyGridMap::OccupancyGridMap(double robot_radius_m)
 }
 
 // ------------------------------------------------------------
-// 相机原点 (odom 系): base 前方 0.12m (CameraExtrinsics::x 同源)
+// 相机原点 (odom 系): base 前方 extrinsics_x_m_ (构造注入,
+// 与 CameraExtrinsics::x 同源 — FIX_PLAN #7, 不再硬编码 0.12)
 // ------------------------------------------------------------
 namespace {
-inline void camera_origin(const Pose2D& pose, double& ox, double& oy) {
-    rotate_2d(0.12, 0.0, pose.theta, ox, oy);
+inline void camera_origin(const Pose2D& pose, double cam_x,
+                          double& ox, double& oy) {
+    rotate_2d(cam_x, 0.0, pose.theta, ox, oy);
     ox += pose.x;
     oy += pose.y;
 }
@@ -58,7 +62,7 @@ void OccupancyGridMap::insert_cloud(const PointCloud& cloud_base,
 
     // 相机原点 (光线起点)
     double ox, oy;
-    camera_origin(robot_pose, ox, oy);
+    camera_origin(robot_pose, extrinsics_x_m_, ox, oy);
 
     // ---- 第一遍: base→odom 世界坐标 + 本帧命中格集合 ----
     // (fix 光线自清除: hit 延后统一应用; 光线 miss 跳过本帧命中格)
@@ -201,6 +205,41 @@ bool OccupancyGridMap::save_pgm(const std::string& path) const {
         }
     }
     std::fclose(f);
+    return true;
+}
+
+bool OccupancyGridMap::save_nav2_map(const std::string& base_path) const {
+    const std::string pgm = base_path + ".pgm";
+    const std::string yaml = base_path + ".yaml";
+
+    // --- P5 二进制 PGM (与 save_pgm 同值映射/行序, 二进制写) ---
+    std::FILE* f = std::fopen(pgm.c_str(), "wb");
+    if (!f) return false;
+    std::fprintf(f, "P5\n%d %d\n255\n", width_, height_);
+    for (int row = height_ - 1; row >= 0; --row) {
+        for (int col = 0; col < width_; ++col) {
+            const int s = occ_state(col, row);
+            const unsigned char v = (s == 100) ? 0u
+                                 : (s == 0   ? 254u : 205u);
+            std::fwrite(&v, 1, 1, f);
+        }
+    }
+    std::fclose(f);
+
+    // --- map.yaml (nav2 map_server 加载项) ---
+    std::FILE* y = std::fopen(yaml.c_str(), "wb");
+    if (!y) return false;
+    std::fprintf(y,
+        "image: %s\n"
+        "resolution: %.6f\n"
+        "origin: [%.6f, %.6f, 0.000000]\n"
+        "negate: 0\n"
+        "occupied_thresh: 0.65\n"
+        "free_thresh: 0.20\n",
+        pgm.c_str(), MapConfig::grid_size_m,
+        -MapConfig::map_width_m * 0.5,
+        -MapConfig::map_height_m * 0.5);
+    std::fclose(y);
     return true;
 }
 

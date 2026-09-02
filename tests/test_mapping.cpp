@@ -133,6 +133,24 @@ int main() {
         CHECK(miss_cols == 0);   // 没有任何列丢失
     }
 
+    // ============ 3d. 相机原点与外参同源 (FIX_PLAN #7 回归) ============
+    {
+        // 构造传 extrinsics_x=0.50: 相机原点应在 base 前方 0.5m。
+        // 机器人在 (1,1) 朝+x, 障碍 base系(1,0) → 世界 (2,1),
+        // 即相机原点 (1.5,1) 正前方 0.5m。
+        // ① 光线从相机原点出发: (1.7,1) 应空闲
+        // ② 光线不打相机身后: (1.25,1) 应保持未知
+        //    (若硬编码 0.12 → 原点 (1.12,1), 光线覆盖 (1.25,1) → ②失败)
+        OccupancyGridMap m(0.25, /*extrinsics_x=*/0.50);
+        Pose2D pose; pose.x = 1.0; pose.y = 1.0;
+        m.insert_cloud(make_cloud_base({{1.0, 0.0}}), pose);
+        int col, row;
+        CHECK(m.world_to_index(1.7, 1.0, col, row));
+        CHECK(m.occ_state(col, row) == 0);
+        CHECK(m.world_to_index(1.25, 1.0, col, row));
+        CHECK(m.occ_state(col, row) == -1);
+    }
+
     // ============ 4. 位姿变换: 旋转+平移 ============
     {
         OccupancyGridMap m;
@@ -232,6 +250,55 @@ int main() {
             const long sz = std::ftell(f);
             CHECK(sz > 1000);
             std::fclose(f);
+        }
+    }
+
+    // ============ 8b. nav2 地图导出: P5 PGM + map.yaml 成对 (FIX_PLAN #3) ============
+    {
+        OccupancyGridMap m;
+        Pose2D pose;
+        m.insert_cloud(make_cloud_base({{2.0, 0.0}}), pose);
+
+        // save_nav2_map: 一次出 pgm+yaml 成对文件
+        CHECK(m.save_nav2_map("/tmp/mechdog_nav2_test"));
+
+        // --- yaml 内容: nav2 map_server 必需五字段 ---
+        std::FILE* f = std::fopen("/tmp/mechdog_nav2_test.yaml", "rb");
+        CHECK(f != nullptr);
+        if (f) {
+            char buf[512] = {0};
+            const size_t rd = std::fread(buf, 1, 511, f);
+            std::fclose(f);
+            (void)rd;
+            CHECK(std::strstr(buf, "image: /tmp/mechdog_nav2_test.pgm") != nullptr);
+            CHECK(std::strstr(buf, "resolution: 0.050000") != nullptr);
+            CHECK(std::strstr(buf, "origin: [-5.000000, -5.000000, 0.000000]") != nullptr);
+            CHECK(std::strstr(buf, "negate: 0") != nullptr);
+            CHECK(std::strstr(buf, "occupied_thresh: 0.65") != nullptr);
+            CHECK(std::strstr(buf, "free_thresh: 0.20") != nullptr);
+        }
+
+        // --- PGM 是 P5 (二进制), 像素数 = w*h ---
+        std::FILE* g = std::fopen("/tmp/mechdog_nav2_test.pgm", "rb");
+        CHECK(g != nullptr);
+        if (g) {
+            char magic[3] = {0};
+            CHECK(std::fread(magic, 1, 2, g) == 2);
+            CHECK(std::string(magic) == "P5");
+            int w2 = 0, h2 = 0, maxv = 0;
+            const int n = std::fscanf(g, " %d %d %d", &w2, &h2, &maxv);
+            CHECK(n == 3);
+            CHECK(w2 == 200 && h2 == 200 && maxv == 255);
+            std::fgetc(g);  // 头后单个空白符
+            // 二进制像素数应恰为 w*h (行序与世界 y 翻转已处理)
+            std::vector<unsigned char> px(static_cast<size_t>(w2) * h2);
+            CHECK(std::fread(px.data(), 1, px.size(), g) == px.size());
+            // 统计值域合法 (0/205/254)
+            bool legal = true;
+            for (unsigned char v : px)
+                if (v != 0 && v != 205 && v != 254) { legal = false; break; }
+            CHECK(legal);
+            std::fclose(g);
         }
     }
 

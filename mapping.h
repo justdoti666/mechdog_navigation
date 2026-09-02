@@ -54,7 +54,11 @@ struct RaycastConfig {
 // ============================================================
 class OccupancyGridMap {
 public:
-    explicit OccupancyGridMap(double robot_radius_m = 0.25);
+    // extrinsics_x_m: 相机原点在 base 前方的偏移 (与
+    // CameraExtrinsics::x 同源, FIX_PLAN #7 — 不再硬编码 0.12)。
+    // 传 CameraExtrinsics{}.x 即可保持与 transform_to_base 一致。
+    explicit OccupancyGridMap(double robot_radius_m = 0.25,
+                              double extrinsics_x_m = CameraExtrinsics{}.x);
 
     // --------------------------------------------------------
     // 单帧更新: base 系点云 + 机器人位姿 → 变换到 odom 系,
@@ -75,8 +79,18 @@ public:
     // --------------------------------------------------------
     // 导出 PGM (P2 格式) + 世界坐标换算辅助。
     // 返回 false = 文件不可写。
+    // 注: P2 为调试/人眼可读格式; nav2 map_server 请用 save_nav2_map。
     // --------------------------------------------------------
     bool save_pgm(const std::string& path) const;
+
+    // --------------------------------------------------------
+    // nav2 map_server 地图导出 (FIX_PLAN #3): P5 二进制 PGM + 配对
+    // map.yaml, 一次调用出两个文件 (base_path 自动补 .pgm/.yaml)。
+    // yaml: image/resolution/origin/negate/occupied_thresh/free_thresh,
+    // origin = 地图左下角世界坐标 (原点居中 → -W/2, -H/2)。
+    // 返回 false = 任一文件不可写。
+    // --------------------------------------------------------
+    bool save_nav2_map(const std::string& base_path) const;
 
     // --------------------------------------------------------
     // 栅格访问 (测试/规划器用)
@@ -129,6 +143,7 @@ private:
     std::vector<int8_t> grid_;   // log-odds
     std::vector<uint8_t> inflated_; // 膨胀层 (0/1), inflate() 后有效
     double robot_radius_m_ = 0.25;
+    double extrinsics_x_m_ = 0.12; // 相机前偏 (与 CameraExtrinsics::x 同源, #7)
 };
 
 } // namespace mechdog
