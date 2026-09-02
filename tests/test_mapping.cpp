@@ -100,6 +100,39 @@ int main() {
         CHECK(m.occ_state(col, row) == -1);
     }
 
+    // ============ 3b. 光线自清除回归 (TDD: 修复前单点命中格=未知) ============
+    {
+        // 单个偏离光轴的障碍点: 光线步进终点曾与命中格同格,
+        // miss 抵消 hit → 占据变未知 (bug 场景)
+        OccupancyGridMap m;
+        Pose2D pose;
+        m.insert_cloud(make_cloud_base({{2.0, 0.6}}), pose);
+        int col, row;
+        CHECK(m.world_to_index(2.0, 0.6, col, row));
+        CHECK(m.occ_state(col, row) == 100);  // 修复前: -1
+    }
+
+    // ============ 3c. 密集墙面不被同帧光线打花 ============
+    {
+        // 一排墙点 (2m 处, y ∈ [-0.8, 0.8]): 修复后每列都应占据
+        OccupancyGridMap m;
+        Pose2D pose;
+        std::vector<std::pair<double,double>> wall;
+        for (double y = -0.8; y <= 0.81; y += 0.1)
+            wall.emplace_back(2.0, y);
+        m.insert_cloud(make_cloud_base(wall), pose);
+        int occ_cols = 0, miss_cols = 0;
+        for (double y = -0.8; y <= 0.81; y += 0.1) {
+            int col, row;
+            CHECK(m.world_to_index(2.0, y, col, row));
+            const int s = m.occ_state(col, row);
+            if (s == 100) ++occ_cols;
+            if (s == -1) ++miss_cols;   // 修复前: 远离光轴的列被打成未知
+        }
+        CHECK(occ_cols >= 15);   // 17 列墙几乎全占据
+        CHECK(miss_cols == 0);   // 没有任何列丢失
+    }
+
     // ============ 4. 位姿变换: 旋转+平移 ============
     {
         OccupancyGridMap m;

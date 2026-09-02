@@ -60,37 +60,51 @@ void OccupancyGridMap::insert_cloud(const PointCloud& cloud_base,
     double ox, oy;
     camera_origin(robot_pose, ox, oy);
 
+    // ---- 第一遍: base→odom 世界坐标 + 本帧命中格集合 ----
+    // (fix 光线自清除: hit 延后统一应用; 光线 miss 跳过本帧命中格)
+    std::vector<std::pair<double, double>> world;
+    world.reserve(cloud_base.points.size());
+    std::vector<int> hit_cells;
+    hit_cells.reserve(cloud_base.points.size());
     for (const auto& p : cloud_base.points) {
-        // --- base 系 → odom 系: 旋转(yaw) + 平移(位姿) ---
         double wx, wy;
         rotate_2d(p.x, p.y, robot_pose.theta, wx, wy);
         wx += robot_pose.x;
         wy += robot_pose.y;
-
-        // --- 光线空闲标记 (仅近距离命中, 防远噪声误清) ---
-        const double dx = wx - ox, dy = wy - oy;
-        const double dist = std::hypot(dx, dy);
-        if (dist > 1e-6 && dist <= rc.max_free_range_m) {
-            // 步进标记沿途格为 miss (log-odds 减)
-            const int steps = static_cast<int>(
-                dist / rc.step_m);
-            for (int s = 1; s < steps; ++s) {
-                const double t = static_cast<double>(s) / steps;
-                const double fx = ox + t * dx, fy = oy + t * dy;
-                int fc, fr;
-                if (!world_to_index(fx, fy, fc, fr)) continue;
-                const size_t fidx =
-                    static_cast<size_t>(fr) * width_ + fc;
-                grid_[fidx] = static_cast<int8_t>(
-                    clamp_l_(grid_[fidx] - LFREE));
-            }
-        }
-
-        // --- 占据标记 (hit, log-odds 加) ---
+        world.emplace_back(wx, wy);
         int col, row;
-        if (!world_to_index(wx, wy, col, row)) continue;
-        const size_t idx = static_cast<size_t>(row) * width_ + col;
-        grid_[idx] = static_cast<int8_t>(clamp_l_(grid_[idx] + LOCC));
+        if (world_to_index(wx, wy, col, row))
+            hit_cells.push_back(static_cast<int>(
+                static_cast<size_t>(row) * width_ + col));
+    }
+    std::vector<int> hit_set = hit_cells;
+    std::sort(hit_set.begin(), hit_set.end());
+    hit_set.erase(std::unique(hit_set.begin(), hit_set.end()),
+                  hit_set.end());
+
+    // ---- 第二遍: 光线空闲标记 (miss; 跳过本帧命中格) ----
+    for (const auto& w : world) {
+        const double dx = w.first - ox, dy = w.second - oy;
+        const double dist = std::hypot(dx, dy);
+        if (dist <= 1e-6 || dist > rc.max_free_range_m) continue;
+        const int steps = static_cast<int>(dist / rc.step_m);
+        for (int s = 1; s < steps; ++s) {
+            const double t = static_cast<double>(s) / steps;
+            const double fx = ox + t * dx, fy = oy + t * dy;
+            int fc, fr;
+            if (!world_to_index(fx, fy, fc, fr)) continue;
+            const int fidx = static_cast<int>(
+                static_cast<size_t>(fr) * width_ + fc);
+            if (std::binary_search(hit_set.begin(), hit_set.end(), fidx))
+                continue;  // 命中格不打 miss (端点/邻命中保护)
+            grid_[fidx] = static_cast<int8_t>(
+                clamp_l_(grid_[fidx] - LFREE));
+        }
+    }
+
+    // ---- 第三遍: 占据标记 (hit 统一应用) ----
+    for (int i : hit_cells) {
+        grid_[i] = static_cast<int8_t>(clamp_l_(grid_[i] + LOCC));
     }
 }
 
