@@ -32,3 +32,9 @@ __pycache__/
 
 # Astra 日志/临时
 astra.log
+
+# 运行调试产物 (日志/地图/预览图)
+Log/
+*.log
+*.pgm
+docs/map_*_preview.png

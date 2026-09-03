@@ -193,26 +193,36 @@ AstraFrame AstraProDriver::capture_real() {
         std::lock_guard<std::mutex> guard(ctx.reader_mutex);
 
         // D1 修正: 无独立事件泵线程 —— 与 SDK 官方 DepthReaderPoll 相同的单执行者
-        // 模式: 本线程在 reader_mutex 内持续 astra_update() + 查帧, 天然无并发。
-        // (此前"删线程 + 5×2ms 短窗口"真机实测出不了帧: 30fps 一帧 = 33ms, 10ms 窗口
-        //  经常错过整帧; 且两次取帧之间无人 pump。现用 ~50ms 轮询窗口覆盖帧周期。)
+        // 模式: 本线程在 reader_mutex 内持续 astra_update() + 取帧, 天然无并发。
+        // 修复: 不再先查 has_new_frame() (其队列状态依赖回调注册, 易恒为 false),
+        // 而是参照 DepthReaderPoll 直接循环 astra_update() + open_frame(0) 直到取到有效深度帧。
+        // (此前 50ms 窗口轮询真机实测恒报 no new frame —— 已定位为查询方式问题。)
         bool got = false;
-        for (int attempt = 0; attempt < 10; ++attempt) {
+        const auto wait_until = std::chrono::steady_clock::now()
+                                + std::chrono::milliseconds(80);   // 覆盖当前帧周期(33ms)
+        std::unique_ptr<astra::Frame> aframe;
+        do {
             astra_update();
-            if (ctx.reader.has_new_frame()) { got = true; break; }
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-        if (!got) {
+            aframe = std::make_unique<astra::Frame>(ctx.reader.get_latest_frame(0));  // timeout=0
+            auto df = aframe->get<astra::DepthFrame>();
+            if (df.is_valid() && df.width() > 0) { got = true; break; }
+            aframe.reset();
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        } while (std::chrono::steady_clock::now() < wait_until);
+
+        if (!got || !aframe) {
             frame.valid = false;
+            std::cerr << "[AstraDrv] capture_real: no valid depth frame in 80ms" << std::endl;
             return frame;
         }
 
-        astra::Frame aframe = ctx.reader.get_latest_frame(0);  // 非阻塞取最新
-        auto depthFrame = aframe.get<astra::DepthFrame>();
-        auto colorFrame = aframe.get<astra::ColorFrame>();
+        auto depthFrame = aframe->get<astra::DepthFrame>();
+        auto colorFrame = aframe->get<astra::ColorFrame>();
 
         if (!depthFrame.is_valid() || depthFrame.width() <= 0) {
             frame.valid = false;
+            std::cerr << "[AstraDrv] capture_real: depthFrame invalid (w="
+                      << depthFrame.width() << ")" << std::endl;
             return frame;
         }
 

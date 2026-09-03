@@ -22,6 +22,8 @@
 #include "path_planner.h"
 #include "point_cloud.h"
 #include "ground_segmentation.h"
+#include "mapping.h"
+#include "heightmap_2d5.h"
 
 #include <chrono>
 #include <csignal>
@@ -72,6 +74,42 @@ static bool g_view_side = false;
 // 共享负障碍点云 (P1, base_link 系地面平面高度处) + 平面锁定状态 (主循环写, 窗口线程读)
 static PointCloud g_neg_cloud;
 static bool g_plane_valid = false;
+
+// ---------------- 建图可视化 (P4, --map 模式启用; 主循环写, 窗口线程读) ----------------
+// 建图模式开关 (--map): true 时把 base 系点云喂进 OccupancyGridMap 并渲染占据图+轨迹
+static bool g_enable_mapping = false;
+// 当前机器人位姿 (odom 系, base_link): 由 --static/--sweep 驱动, 随帧序推进
+static mechdog::Pose2D g_current_pose;
+// 是否原地旋转扫描 (--sweep <deg>): true 时位姿航向按帧序线性推进
+static bool g_sweep_mode = false;
+static double g_sweep_deg = 0.0;   // 总旋转角度 (度), 0=静止
+// 机器人轨迹 (Pose2D 序列, 随帧 append, 窗口线程画折线)
+static std::vector<mechdog::Pose2D> g_trace;
+// 栅格地图快照 (窗口线程读; 存 occ_state 摘要 -1/0/100, 而非整个 grid, 控制拷贝成本)
+struct MapSnapshot {
+    bool   valid = false;
+    int    w = 0, h = 0;
+    double resolution_m = 0.05;
+    std::vector<int8_t> cells;   // occ_state: -1=未知 0=空闲 100=占据
+    std::string stats;
+};
+static MapSnapshot g_map_snapshot;
+// 真机帧显式停止: 建图时每采集 --frame-n 帧后停止 (--frame-n 0 = 无限循环)
+static std::atomic<int> g_map_max_frames{0};
+static int g_map_frame_count = 0;
+static std::atomic<bool> g_map_saved{false};  // 采集上限达到后已保存 PGM (防重复)
+// 建图器 (P4 OccupancyGridMap; 主循环 insert_cloud 写, 窗口线程读 g_map_snapshot)
+static mechdog::OccupancyGridMap g_mapper(0.25);
+// ---- P1.5 2.5D 近场地形 (--hm25 开启; 主循环 build_heightmap_25 写, 窗口读 g_hm25_snapshot) ----
+static bool g_enable_hm25 = false;
+struct Hm25Snapshot {
+    bool   valid = false;
+    int    cols = 0, rows = 0;
+    double cell_size = 0.05, min_x_m = 0.0, y_half_m = 0.0;
+    std::vector<mechdog::CellFlag> flag;   // CellFlag 值
+    std::string stats;
+};
+static Hm25Snapshot g_hm25_snapshot;
 // 诊断开关: 水平镜像深度图 (Astra 深度与 RGB 的左右关系存疑, 按 M 实测裁决)
 static std::atomic<bool> g_flip_depth{false};
 // 诊断开关: 深度热力图叠加 RGB (近=红 远=蓝; 对齐则热力落在实物上, 镜像则左右互换)
@@ -393,6 +431,172 @@ static void draw_cloud_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
     g.DrawString(buf2, -1, &font, sp2, &dim);
 }
 
+// ---------------- P4 建图可视化渲染 ----------------
+// 渲染 2D 占据栅格图 (俯视): 0=未知(深灰) 空闲(浅灰) 占据(橙), 叠加机器人轨迹折线。
+// cells 为 occ_state 摘要 (-1/0/100), w/h 为栅格尺寸, resolution_m 为每格米数。
+static void draw_map_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
+                          const std::vector<int8_t>& cells, int w, int h,
+                          double resolution_m) {
+    using namespace Gdiplus;
+    if (cells.empty() || w <= 0 || h <= 0 || cw <= 0 || ch <= 0) return;
+
+    // 背景: 地图背板
+    SolidBrush bg(Color(255, 24, 26, 32));
+    g.FillRectangle(&bg, x, y, cw, ch);
+    // 边框
+    Pen border(Color(180, 90, 90, 100), 1);
+    g.DrawRectangle(&border, x, y, cw - 1, ch - 1);
+
+    // 每格像素尺寸 (保持栅格纵横, 用较小的那个保证不裁剪)
+    const double px_cell_x = static_cast<double>(cw) / w;
+    const double px_cell_y = static_cast<double>(ch) / h;
+    const double px_cell = (std::min)(px_cell_x, px_cell_y);
+    // 地图居中 (多余空白两侧补齐)
+    const int map_px_w = static_cast<int>(std::lround(px_cell * w));
+    const int map_px_h = static_cast<int>(std::lround(px_cell * h));
+    const int off_x = x + (cw - map_px_w) / 2;
+    const int off_y = y + (ch - map_px_h) / 2;
+
+    // 占据/空闲/未知色
+    SolidBrush occ_brush(Color(255, 245, 120, 30));    // 占据=橙
+    SolidBrush free_brush(Color(255, 70, 74, 84));     // 空闲=深灰
+    SolidBrush unk_brush(Color(255, 30, 32, 40));      // 未知=更深
+
+    // 逐格填充 (只画非未知格, 未知透出背景)
+    for (int row = 0; row < h; ++row) {
+        for (int col = 0; col < w; ++col) {
+            const int8_t s = cells[static_cast<size_t>(row) * w + col];
+            if (s == 0) {  // 空闲
+                g.FillRectangle(&unk_brush,
+                    (REAL)(off_x + static_cast<int>(col * px_cell)),
+                    (REAL)(off_y + static_cast<int>(row * px_cell)),
+                    (REAL)(px_cell + 0.5), (REAL)(px_cell + 0.5));
+            } else if (s == 100) {  // 占据
+                g.FillRectangle(&occ_brush,
+                    (REAL)(off_x + static_cast<int>(col * px_cell)),
+                    (REAL)(off_y + static_cast<int>(row * px_cell)),
+                    (REAL)(px_cell + 0.5), (REAL)(px_cell + 0.5));
+            }
+            // s==-1 (未知) 不填充, 露出背景
+        }
+    }
+
+    Font font(L"Arial", 12);
+    SolidBrush dim(Color(220, 160, 160, 160));
+    Gdiplus::PointF lbl((REAL)(off_x + 8), (REAL)(off_y + 8));
+    g.DrawString(L"MAP (occ=orange free=dark unk=bg)", -1, &font, lbl, &dim);
+}
+
+// 渲染机器人轨迹 (折线, 世界米 → 屏幕像素, 与 draw_map_view 同地图坐标)
+static void draw_trace(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
+                       const std::vector<mechdog::Pose2D>& trace, int map_w, int map_h,
+                       double resolution_m) {
+    using namespace Gdiplus;
+    if (trace.size() < 2 || map_w <= 0 || map_h <= 0 || cw <= 0 || ch <= 0) return;
+
+    // 与 draw_map_view 相同的居中映射
+    const double px_cell_x = static_cast<double>(cw) / map_w;
+    const double px_cell_y = static_cast<double>(ch) / map_h;
+    const double px_cell = (std::min)(px_cell_x, px_cell_y);
+    const int map_px_w = static_cast<int>(std::lround(px_cell * map_w));
+    const int map_px_h = static_cast<int>(std::lround(px_cell * map_h));
+    const int off_x = x + (cw - map_px_w) / 2;
+    const int off_y = y + (ch - map_px_h) / 2;
+    const int half_w = map_w / 2, half_h = map_h / 2;  // 地图原点居中 (建图索引原点居中)
+
+    // 世界坐标 → 栅格 (col=x, row=y) → 屏幕像素
+    auto to_px = [&](double wx, double wy) {
+        int col = static_cast<int>(std::lround(wx / resolution_m)) + half_w;
+        int row = static_cast<int>(std::lround(wy / resolution_m)) + half_h;
+        return Gdiplus::PointF(
+            (REAL)(off_x + static_cast<int>(col * px_cell)),
+            (REAL)(off_y + static_cast<int>(row * px_cell)));
+    };
+
+    Pen trace_pen(Color(255, 0, 200, 255), 2);   // 轨迹=青
+    // 机头方向 (当前位姿, 画一段指向箭头)
+    const auto& last = trace.back();
+    Gdiplus::PointF prev = to_px(trace[0].x, trace[0].y);
+    for (size_t i = 1; i < trace.size(); ++i) {
+        Gdiplus::PointF cur = to_px(trace[i].x, trace[i].y);
+        g.DrawLine(&trace_pen, prev, cur);
+        prev = cur;
+    }
+    // 起点标记
+    SolidBrush start_brush(Color(255, 120, 255, 120));
+    {
+        Gdiplus::PointF sp0 = to_px(trace[0].x, trace[0].y);
+        g.FillEllipse(&start_brush, sp0.X - 3.0f, sp0.Y - 3.0f, 6.0f, 6.0f);
+    }
+    // 当前机头: 从当前位置沿 theta 方向画短箭头
+    SolidBrush head_brush(Color(255, 255, 240, 0));
+    Gdiplus::PointF cur = to_px(last.x, last.y);
+    const double DEG2RAD = 0.01745329251994329576;
+    const double len = 0.25 / resolution_m * px_cell;  // 0.25m 箭头
+    Gdiplus::PointF tip(cur.X + (REAL)(std::cos(last.theta) * len),
+                        cur.Y - (REAL)(std::sin(last.theta) * len));
+    Pen head_pen(Color(255, 255, 240, 0), 2);
+    g.DrawLine(&head_pen, cur, tip);
+    g.FillEllipse(&head_brush, cur.X - 3.0f, cur.Y - 3.0f, 6.0f, 6.0f);
+}
+
+// ---------------- P1.5 2.5D 近场地形可视化 ----------------
+// 把 HeightMap25 的 flag 渲染成彩色格子俯视图:
+//   绿=能走(Traversable) 橙=凸起障碍(ObstacleUp) 红=沟/坑(CliffDown)
+//   蓝=太陡(TooSteep) 深灰=未知(Unknown)
+// 布局: 上=远(x 大) 下=近(x 小) 左右=y. 由近及远=从下往上.
+static void draw_hm25_view(Gdiplus::Graphics& g, int x, int y, int cw, int ch,
+                           const std::vector<mechdog::CellFlag>& flag, int cols, int rows,
+                           double cell_size, double min_x_m, double y_half_m) {
+    using namespace Gdiplus;
+    if (flag.empty() || cols <= 0 || rows <= 0 || cw <= 0 || ch <= 0) return;
+
+    SolidBrush bg(Color(255, 24, 26, 32));
+    g.FillRectangle(&bg, x, y, cw, ch);
+    Pen border(Color(180, 90, 90, 100), 1);
+    g.DrawRectangle(&border, x, y, cw - 1, ch - 1);
+
+    SolidBrush trav(Color(255, 60, 200, 90));    // 能走=绿
+    SolidBrush up(Color(255, 245, 140, 30));     // 凸起=橙
+    SolidBrush down(Color(255, 230, 50, 50));    // 沟/坑=红
+    SolidBrush steep(Color(255, 60, 140, 230));  // 太陡=蓝
+    // 未知=透出背景(灰色)
+
+    // 纵向 = x 方向(近→远 = 下→上); 横向 = y 方向
+    const double px_cell_x = static_cast<double>(cw) / cols;
+    const double px_cell_y = static_cast<double>(ch) / rows;
+    const double px_cell = (std::min)(px_cell_x, px_cell_y);
+    const int map_px_w = static_cast<int>(std::lround(px_cell * cols));
+    const int map_px_h = static_cast<int>(std::lround(px_cell * rows));
+    const int off_x = x + (cw - map_px_w) / 2;
+    const int off_y = y + (ch - map_px_h) / 2;
+
+    for (int r = 0; r < rows; ++r) {       // r = y 方向
+        for (int c = 0; c < cols; ++c) {   // c = x 方向(前)
+            const mechdog::CellFlag f = flag[static_cast<size_t>(r) * cols + c];
+            SolidBrush* brush = nullptr;
+            switch (f) {
+                case mechdog::CellFlag::Traversable: brush = &trav; break;
+                case mechdog::CellFlag::ObstacleUp:  brush = &up; break;
+                case mechdog::CellFlag::CliffDown:   brush = &down; break;
+                case mechdog::CellFlag::TooSteep:    brush = &steep; break;
+                default: continue;  // Unknown 透出背景
+            }
+            // x 前向 → 屏幕 y 上置: c 大(远) → 屏幕上方
+            const int sx = off_x + static_cast<int>(c * px_cell);
+            const int sy = off_y + (map_px_h - static_cast<int>((r + 1) * px_cell));
+            g.FillRectangle(brush, (REAL)sx, (REAL)sy,
+                            (REAL)(px_cell + 0.5), (REAL)(px_cell + 0.5));
+        }
+    }
+
+    // 图例
+    Font font(L"Arial", 11);
+    SolidBrush dim(Color(230, 200, 200, 200));
+    Gdiplus::PointF leg((REAL)(off_x + 6), (REAL)(y + 6));
+    g.DrawString(L"2.5D: G=能走 O=凸起 R=沟/坑 B=陡", -1, &font, leg, &dim);
+}
+
 // 窗口绘制 (双缓冲: 先在内存 Bitmap 画完整帧, 再一次性上屏, 消除闪烁)
 static void draw_scene_impl(HDC hdc, int w, int h) {
     using namespace Gdiplus;
@@ -418,6 +622,11 @@ static void draw_scene_impl(HDC hdc, int w, int h) {
     std::vector<uint8_t> local_heat;
     int heat_w = 0, heat_h = 0;
     bool heat_valid = false;
+    // P4 建图快照 (窗口线程读)
+    MapSnapshot local_map;
+    std::vector<mechdog::Pose2D> local_trace;
+    // P1.5 2.5D 近场地形快照 (窗口线程读)
+    Hm25Snapshot local_hm25;
     {
         std::lock_guard<std::mutex> lock(g_viz_mutex);
         local_color = g_color_frame;
@@ -429,6 +638,9 @@ static void draw_scene_impl(HDC hdc, int w, int h) {
         local_heat = g_heat_bgr;
         heat_w = g_heat_w; heat_h = g_heat_h;
         heat_valid = g_heat_valid;
+        local_map = g_map_snapshot;
+        local_trace = g_trace;
+        local_hm25 = g_hm25_snapshot;
     }
 
     // ===== 节流: 点云数据未更新且距上次绘制 <80ms → 整帧跳过 (陈旧重绘抑制) =====
@@ -455,7 +667,43 @@ static void draw_scene_impl(HDC hdc, int w, int h) {
 
     // ===== 点云模式: 优先点云视图 (分屏或全屏) =====
     if (g_view_cloud) {
-        if (color_ok && cloud_ok) {
+        if ((g_enable_mapping && local_map.valid || g_enable_hm25 && local_hm25.valid)
+            && cloud_ok) {
+            // 建图/2.5D 模式: 三栏 [彩色帧 | 点云俯视图 | 右栏]
+            int third = w / 3;
+            if (color_ok)
+                draw_color_frame(g, 0, 0, third, h, local_color);
+            draw_cloud_view(g, third, 0, w - 2 * third, h, local_cloud, g_view_side,
+                            local_neg, plane_valid, depth_flipped);
+            if (g_enable_hm25 && local_hm25.valid) {
+                // 右栏 = 2.5D 近场地形 (优先)
+                draw_hm25_view(g, w - third, 0, third, h, local_hm25.flag,
+                               local_hm25.cols, local_hm25.rows, local_hm25.cell_size,
+                               local_hm25.min_x_m, local_hm25.y_half_m);
+                if (!local_hm25.stats.empty()) {
+                    Font mfont(L"Arial", 10);
+                    SolidBrush mdim(Color(220, 180, 180, 180));
+                    Gdiplus::PointF msp((REAL)(w - third + 6), (REAL)(h - 22));
+                    g.DrawString(widen(local_hm25.stats.c_str()).c_str(), -1, &mfont, msp, &mdim);
+                }
+            } else if (g_enable_mapping && local_map.valid) {
+                // 右栏 = P4 占据图 + 轨迹
+                draw_map_view(g, w - third, 0, third, h, local_map.cells,
+                              local_map.w, local_map.h, local_map.resolution_m);
+                draw_trace(g, w - third, 0, third, h, local_trace,
+                           local_map.w, local_map.h, local_map.resolution_m);
+                if (!local_map.stats.empty()) {
+                    Font mfont(L"Arial", 11);
+                    SolidBrush mdim(Color(220, 180, 180, 180));
+                    Gdiplus::PointF msp((REAL)(w - third + 8), (REAL)(h - 24));
+                    g.DrawString(widen(local_map.stats.c_str()).c_str(), -1, &mfont, msp, &mdim);
+                }
+            }
+            Pen sep1(Color(120, 255, 255, 255), 1);
+            g.DrawLine(&sep1, third, 0, third, h);
+            Pen sep2(Color(120, 255, 255, 255), 1);
+            g.DrawLine(&sep2, w - third, 0, w - third, h);
+        } else if (color_ok && cloud_ok) {
             // 分屏: 左半彩色帧, 右半点云俯视图
             int half = w / 2;
             draw_color_frame(g, 0, 0, half, h, local_color);
@@ -699,6 +947,15 @@ int main(int argc, char** argv) {
     bool show_cloud = false;
     bool ground_free = false;
     double ground_h = 0.8;   // 手持相机离地高度 (米), --ground <h> 覆盖
+    // 建图可视化参数 (P4, --map)
+    bool enable_mapping = false;
+    bool enable_hm25 = false;   // P1.5 2.5D 近场地形可视化
+    bool sweep_mode = false;
+    double sweep_deg = 0.0;
+    int map_max_frames = 0;  // 0 = 无限循环
+    // 相机外参实机调节 (P1.5 2.5D 需要; 默认取 CameraExtrinsics 占位值, 可命令行覆盖)
+    double extr_pitch_deg = 15.0;   // 前俯角(度), 向下为+ (实测约 10°)
+    double extr_height_m  = 0.18;   // 相机离地高(米) (实测填)
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
         if (arg == "--real" || arg == "-r") use_real = true;
@@ -709,6 +966,32 @@ int main(int argc, char** argv) {
             ground_free = true;
             ground_h = (std::max)(0.1, atof(argv[++i]));  // 括号包住: windows.h 的 max 宏冲突
         }
+        if (arg == "--map") enable_mapping = true;       // 启用建图可视化
+        if (arg == "--hm25") enable_hm25 = true;         // 启用 2.5D 近场地形可视化
+        if (arg == "--sweep" && i + 1 < argc) {          // 原地旋转扫描 (匀速假设)
+            sweep_mode = true;
+            sweep_deg = atof(argv[++i]);                 // 总旋转角度 (度)
+        }
+        if (arg == "--static") {                          // 显式静止位姿 (默认), 取消 sweep
+            sweep_mode = false;
+            sweep_deg = 0.0;
+        }
+        if (arg == "--frame-n" && i + 1 < argc) {         // 采集 N 帧后停 (0=无限)
+            map_max_frames = atoi(argv[++i]);
+        }
+        if (arg == "--pitch" && i + 1 < argc) {         // 相机前俯角(度), 实机标定点云用
+            extr_pitch_deg = atof(argv[++i]);
+        }
+        if (arg == "--height" && i + 1 < argc) {        // 相机离地高(米), 实机标定点云用
+            extr_height_m = atof(argv[++i]);
+        }
+    }
+
+    // 建图/2.5D 可视化依赖点云视图/点云管线 (建图段在 show_cloud 内生成 cloud_base),
+    // 故 --map/--hm25 隐式开启 --cloud, 保证窗口进点云分支并喂点云。
+    if (enable_mapping || enable_hm25) {
+        show_cloud = true;
+        if (map_max_frames <= 0) map_max_frames = 0;
     }
 
 #ifdef USE_ASTRA_SDK
@@ -739,6 +1022,20 @@ int main(int argc, char** argv) {
     g_astra_ptr = &astra;
     // 点云可视化模式: 提前设全局标志 (窗口线程 draw_scene 据此优先渲染点云)
     g_view_cloud = show_cloud;
+    // 建图可视化模式: 同步全局状态 (--map; 窗口线程据此渲染占据图+轨迹)
+    g_enable_mapping = enable_mapping;
+    g_enable_hm25 = enable_hm25;
+    g_sweep_mode = sweep_mode;
+    g_sweep_deg = sweep_deg;
+    g_map_max_frames = map_max_frames;
+    if (enable_mapping) {
+        g_current_pose = mechdog::Pose2D{};  // 初始位姿: 原点朝 +x
+        std::cout << "[P4] 建图可视化: 位姿="
+                  << (sweep_mode ? "原地旋转扫描 " + std::to_string(sweep_deg) + "°"
+                                 : "静止原点")
+                  << (map_max_frames > 0 ? ", 采集 " + std::to_string(map_max_frames) + " 帧后停"
+                                         : "") << std::endl;
+    }
     // 启动可视化窗口线程 (--noviz 可禁用, 用于定位崩溃)
     if (!no_viz) {
         CreateThread(nullptr, 0, window_thread, nullptr, 0, nullptr);
@@ -760,6 +1057,12 @@ int main(int argc, char** argv) {
         // 模拟模式点云: 无外参, 纯验证链路
         cloud_E.x = 0; cloud_E.y = 0; cloud_E.z = 0;
         cloud_E.roll = 0; cloud_E.pitch = 0; cloud_E.yaw = 0;
+    }
+    // P1.5 2.5D: 用实机标定的外参 (默认沿用 CameraExtrinsics 占位值; 可用 --pitch/--height 覆盖).
+    // 仅真机点云(+--hm25/--cloud)时生效, 模拟/--ground 会归零外参(见下).
+    if (!ground_free) {
+        cloud_E.pitch = extr_pitch_deg * 0.01745329251994329576;  // 度→弧度 (向下为+)
+        cloud_E.z = extr_height_m;
     }
     // P1 地面分割手持模式 (--ground <h> / --free): 外参归零使 base==link
     // (可视化标记与点云同系对齐), 高度先验 = -h, 窗口收紧 —— "地面在哪"由真实
@@ -857,6 +1160,90 @@ int main(int argc, char** argv) {
                 GroundSegResult seg;
                 segment_ground(cloud_base, gseg_params, seg);
 
+                // ---- P1.5 2.5D 近场地形: 基于 P1 平面 + 点云建高程/可通行格 (--hm25) ----
+                if (g_enable_hm25) {
+                    // 诊断: 只打印一次 cloud_base 范围 + P1 平面
+                    static bool hm25_diag_once = false;
+                    if (!hm25_diag_once) {
+                        hm25_diag_once = true;
+                        if (cloud_base.points.empty()) {
+                            std::cout << "[hm25] cloud_base EMPTY" << std::endl;
+                        } else {
+                            double x0=1e9,x1=-1e9,y0=1e9,y1=-1e9,z0=1e9,z1=-1e9;
+                            for (auto& pt : cloud_base.points) {
+                                x0=(std::min)(x0,pt.x); x1=(std::max)(x1,pt.x);
+                                y0=(std::min)(y0,pt.y); y1=(std::max)(y1,pt.y);
+                                z0=(std::min)(z0,pt.z); z1=(std::max)(z1,pt.z);
+                            }
+                            std::cout << "[hm25] pts=" << cloud_base.points.size()
+                                      << " x[" << x0 << "," << x1 << "]"
+                                      << " y[" << y0 << "," << y1 << "]"
+                                      << " z[" << z0 << "," << z1 << "]"
+                                      << " plane=" << seg.plane.valid << std::endl;
+                        }
+                    }
+                    HeightMap25Result hm;
+                    HeightMap25Config hcfg;
+                    build_heightmap_25(cloud_base, seg, hcfg, hm);
+                    if (hm.valid) std::cout << "[hm25] " << hm.stats() << std::endl;
+                    else std::cout << "[hm25] invalid (no ground plane)" << std::endl;
+                    std::lock_guard<std::mutex> lock2(g_viz_mutex);
+                    g_hm25_snapshot.valid = hm.valid;
+                    g_hm25_snapshot.cols = hm.cols;
+                    g_hm25_snapshot.rows = hm.rows;
+                    g_hm25_snapshot.cell_size = hm.cell_size;
+                    g_hm25_snapshot.min_x_m = hm.min_x_m;
+                    g_hm25_snapshot.y_half_m = hm.y_half_m;
+                    g_hm25_snapshot.flag.assign(hm.flag.begin(), hm.flag.end());
+                    g_hm25_snapshot.stats = hm.stats();
+                }
+
+                // ---- P4 建图: 把 base 系点云 + 位姿喂进 OccupancyGridMap (--map) ----
+                if (g_enable_mapping) {
+                    // 位姿推进 (匀速假设): sweep 模式航向按帧序线性推进, 否则静止
+                    const int frame_idx = g_map_frame_count++;
+                    if (g_sweep_mode && g_sweep_deg > 0.0) {
+                        const double DEG2RAD = 0.01745329251994329576;
+                        const double f_max = (std::max)(1, g_map_max_frames.load());
+                        g_current_pose.theta = g_sweep_deg * DEG2RAD
+                                               * static_cast<double>(frame_idx)
+                                               / static_cast<double>(f_max);
+                    }
+
+                    // 达到采集上限: 冻结地图 (不再 insert), 保存一次 PGM, 提示用户
+                    const bool over = (g_map_max_frames > 0 &&
+                                       frame_idx >= g_map_max_frames);
+                    if (!over) {
+                        // 建图增量更新 (不影响融合/避障; 静止时拼单视角, sweep 时拼圆周)
+                        g_mapper.insert_cloud(cloud_base, g_current_pose);
+                        g_trace.push_back(g_current_pose);
+                    } else if (!g_map_saved.load()) {
+                        g_map_saved.store(true);
+                        const std::string pgm_path = "mechdog_map_live.pgm";
+                        const bool ok = g_mapper.save_pgm(pgm_path);
+                        std::cout << "[P4] 已采集 " << g_map_max_frames
+                                  << " 帧, 地图冻结. PGM "
+                                  << (ok ? "已保存: " + pgm_path
+                                         : "保存失败") << std::endl;
+                        std::cout << "[P4] " << g_mapper.stats() << std::endl;
+                    }
+
+                    // 生成栅格快照 (拷贝 occ_state 摘要, 窗口线程读)
+                    {
+                        std::lock_guard<std::mutex> lock(g_viz_mutex);
+                        g_map_snapshot.valid = true;
+                        g_map_snapshot.w = g_mapper.width();
+                        g_map_snapshot.h = g_mapper.height();
+                        g_map_snapshot.resolution_m = g_mapper.resolution();
+                        g_map_snapshot.cells.assign(
+                            static_cast<size_t>(g_mapper.width()) * g_mapper.height(), 0);
+                        for (int ci = 0; ci < g_mapper.width() * g_mapper.height(); ++ci)
+                            g_map_snapshot.cells[ci] =
+                                static_cast<int8_t>(g_mapper.occ_state(ci));
+                        g_map_snapshot.stats = g_mapper.stats();
+                    }
+                }
+
                 std::lock_guard<std::mutex> lock(g_viz_mutex);
                 g_latest_cloud = cloud_ds;
                 g_have_cloud = true;
@@ -923,7 +1310,9 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
                   // P1: g_latest_cloud 仅在上方 _WIN32 块声明, 非 Windows 平台无点云可视化;
                   // 无条件引用曾导致 Linux/gcc 构建直接失败 (第五轮 review)
-                  << (show_cloud ? " cloud_pts=" + std::to_string(g_latest_cloud.points.size()) : "")
+                  << (show_cloud ? " cloud_pts=" + std::to_string(g_latest_cloud.points.size())
+                                + " state=" + std::to_string(g_cloud_state.load())
+                                + " vpx=" + std::to_string(g_cloud_valid_px.load()) : "")
 #endif
                   << std::endl;
 

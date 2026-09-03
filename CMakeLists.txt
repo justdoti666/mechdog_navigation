@@ -51,6 +51,7 @@ set(SOURCES
     path_planner.cpp
     point_cloud.cpp
     ground_segmentation.cpp
+    heightmap_2d5.cpp
 )
 
 # 可执行文件
@@ -107,6 +108,13 @@ add_executable(test_mapping tests/test_mapping.cpp point_cloud.cpp mapping.cpp)
 target_include_directories(test_mapping PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_mapping PRIVATE Threads::Threads)
 add_test(NAME mapping_tests COMMAND test_mapping)
+
+# 2.5D 高程/可通行地形单测 (P1.5, 近场越障)
+add_executable(test_heightmap_2d5 tests/test_heightmap_2d5.cpp
+    ground_segmentation.cpp point_cloud.cpp heightmap_2d5.cpp)
+target_include_directories(test_heightmap_2d5 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_heightmap_2d5 PRIVATE Threads::Threads)
+add_test(NAME heightmap_2d5_tests COMMAND test_heightmap_2d5)
 
 # 真机建图验证工具 (P4, 仅 USE_ASTRA_SDK 模式编译, Windows 侧运行)
 if(USE_ASTRA_SDK)
