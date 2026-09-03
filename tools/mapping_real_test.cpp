@@ -93,7 +93,10 @@ int main(int argc, char** argv) {
         depth_to_cloud(f.depth_map.data(), f.depth_width,
                        f.depth_height, K, cloud_optical);
         transform_to_base(cloud_optical, E, cloud_base);
-        map.insert_cloud(cloud_base, pose);
+
+        // FIX_PLAN #1: 地面过滤建图 — 地面点剔除(消假墙),
+        // 负障碍(坑/台阶)单独标记层, 只投障碍点
+        map.insert_cloud_filtered(cloud_base, pose);
 
         ++valid_frames;
         total_points += static_cast<int>(cloud_base.points.size());

@@ -19,6 +19,7 @@
 
 #include "config.h"
 #include "point_cloud.h"
+#include "ground_segmentation.h"  // insert_cloud_filtered (FIX_PLAN #1)
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -54,15 +55,38 @@ struct RaycastConfig {
 // ============================================================
 class OccupancyGridMap {
 public:
-    explicit OccupancyGridMap(double robot_radius_m = 0.25);
+    // ------------------------------------------------------------
+    // 构造 (FIX_PLAN #6: 尺寸/分辨率运行时参数化, 不再编译期定死)。
+    // cfg 为占位 (MapConfig 默认值供兼容), 实际用下方显式参数:
+    //   width_m/height_m  地图物理尺寸 (默认 MapConfig 的 10x10m)
+    //   resolution_m      栅格分辨率    (默认 MapConfig 的 5cm)
+    // extrinsics_x_m: 相机原点 base 前偏 (CameraExtrinsics::x 同源, #7)
+    // ------------------------------------------------------------
+    explicit OccupancyGridMap(const MapConfig& cfg = MapConfig{},
+                              double robot_radius_m = 0.25,
+                              double extrinsics_x_m = CameraExtrinsics{}.x,
+                              double width_m  = MapConfig::map_width_m,
+                              double height_m = MapConfig::map_height_m,
+                              double resolution_m = MapConfig::grid_size_m);
 
     // --------------------------------------------------------
     // 单帧更新: base 系点云 + 机器人位姿 → 变换到 odom 系,
     // 光线标记空闲 + 端点标记占据 (log-odds)。
     // 空点云/空位姿安全跳过 (不崩溃, 不清图)。
+    // 越界点计入 dropped_points() (FIX_PLAN #6: 不再静默丢)。
     // --------------------------------------------------------
     void insert_cloud(const PointCloud& cloud_base,
                       const Pose2D& robot_pose);
+
+    // --------------------------------------------------------
+    // 地面过滤入口 (FIX_PLAN #1): 先 segment_ground 分离地面,
+    // 障碍点走 insert_cloud (占据+光线), 负障碍点(坑/下行台阶)
+    // 单独标记到 negative_ 层 (FIX_PLAN #9: 不参与光线打空,
+    // 不算普通占据 — 坑是绕行目标, 语义独立)。
+    // 地面点丢弃 → 消除"地面投影成假墙"。
+    // --------------------------------------------------------
+    void insert_cloud_filtered(const PointCloud& cloud_base,
+                               const Pose2D& robot_pose);
 
     // --------------------------------------------------------
     // 障碍膨胀 (供规划器消费前的后处理): 对每个占据格,
@@ -75,8 +99,18 @@ public:
     // --------------------------------------------------------
     // 导出 PGM (P2 格式) + 世界坐标换算辅助。
     // 返回 false = 文件不可写。
+    // 注: P2 为调试/人眼可读格式; nav2 map_server 请用 save_nav2_map。
     // --------------------------------------------------------
     bool save_pgm(const std::string& path) const;
+
+    // --------------------------------------------------------
+    // nav2 map_server 地图导出 (FIX_PLAN #3): P5 二进制 PGM + 配对
+    // map.yaml, 一次调用出两个文件 (base_path 自动补 .pgm/.yaml)。
+    // yaml: image/resolution/origin/negate/occupied_thresh/free_thresh,
+    // origin = 地图左下角世界坐标 (原点居中 → -W/2, -H/2)。
+    // 返回 false = 任一文件不可写。
+    // --------------------------------------------------------
+    bool save_nav2_map(const std::string& base_path) const;
 
     // --------------------------------------------------------
     // 栅格访问 (测试/规划器用)
@@ -84,10 +118,19 @@ public:
     // --------------------------------------------------------
     int width()  const { return width_; }
     int height() const { return height_; }
-    double resolution() const { return MapConfig::grid_size_m; }
+    double resolution() const { return resolution_m_; }
     int cell_value(int idx) const { return grid_[idx]; } // 原始 log-odds(截断int)
     int occ_state(int idx) const;   // -1=未知 0=空闲 100=占据(归一化概率语义)
     int occ_state(int col, int row) const;
+
+    // 负障碍标记层 (FIX_PLAN #9): 1=坑/下行台阶标记, 0=无
+    int negative_state(int col, int row) const {
+        if (col < 0 || col >= width_ || row < 0 || row >= height_) return 0;
+        return negative_[static_cast<size_t>(row) * width_ + col];
+    }
+
+    // 越界丢弃点计数 (FIX_PLAN #6)
+    long dropped_points() const { return dropped_points_; }
 
     // 坐标换算: 世界(odom 米) ↔ 栅格索引 (const, 无越界写)
     bool world_to_index(double wx, double wy, int& col, int& row) const;
@@ -107,15 +150,11 @@ private:
     static constexpr int L_FREE_TH = -4; // 判空闲阈值
 
     int world_to_col_row_(double v) const {  // 米→格, 原点居中
-        return static_cast<int>(std::lround(v / MapConfig::grid_size_m))
-               + dim_cells_() / 2;
+        return static_cast<int>(std::lround(v / resolution_m_))
+               + width_ / 2;
     }
     double col_row_to_world_(int i) const {
-        return (i - dim_cells_() / 2) * MapConfig::grid_size_m;
-    }
-    int dim_cells_() const {
-        return static_cast<int>(std::lround(
-            MapConfig::map_width_m / MapConfig::grid_size_m));
+        return (i - width_ / 2) * resolution_m_;
     }
     int clamp_l_(int v) const {
         return v < LMIN ? LMIN : (v > LMAX ? LMAX : v);
@@ -126,9 +165,13 @@ private:
                               double hit_x, double hit_y);
 
     int width_ = 0, height_ = 0;
+    double resolution_m_ = MapConfig::grid_size_m;
     std::vector<int8_t> grid_;   // log-odds
     std::vector<uint8_t> inflated_; // 膨胀层 (0/1), inflate() 后有效
+    std::vector<uint8_t> negative_; // 负障碍标记层 (FIX_PLAN #9)
+    long dropped_points_ = 0;       // 越界丢弃计数 (FIX_PLAN #6)
     double robot_radius_m_ = 0.25;
+    double extrinsics_x_m_ = 0.12; // 相机前偏 (与 CameraExtrinsics::x 同源, #7)
 };
 
 } // namespace mechdog
