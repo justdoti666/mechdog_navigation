@@ -44,11 +44,13 @@
 | 点云模块 | `point_cloud.h/.cpp` | 深度图→3D 点云反投影、光学系→link 系坐标变换（P0，供规划/建图预留，独立于融合层） |
 | 地面分割 | `ground_segmentation.h/.cpp` | 受约束 RANSAC 地面平面 + 2.5D 栅格**负障碍检测**（坑/下行台阶，P1；门口试金石单测锁定） |
 | 建图模块 | `mapping.h/.cpp` | 位姿驱动点云累积 → log-odds 占据栅格 + 光线空闲 + 膨胀 + PGM 导出（P4） |
+| 2.5D 近场地形 | `heightmap_2d5.h/.cpp` | 单平面 2.5D 高程/可通行地形 → 越障判断（能走/凸起/沟坑/太陡，P1.5；复用 P1 地面平面） |
 | 路径规划 | `path_planner.h/.cpp` | 导航动作 -> 速度指令映射（DWA 待实现） |
 | 单元测试 | `tests/test_fusion.cpp` | F4/F5 回归 + 融合逻辑验证 (`ctest`) |
 | 点云单测 | `tests/test_point_cloud.cpp` | 反投影/坐标变换/失效哨兵验证 (`ctest`，P0) |
 | 地面分割单测 | `tests/test_ground_segmentation.cpp` | 平地/坑/台阶/门口试金石/倾斜/退化输入 (`ctest`，P1) |
 | 建图单测 | `tests/test_mapping.cpp` | 坐标换算/占空判定/位姿变换/多帧累积/动态清障/膨胀/PGM (`ctest`，P4，40 断言) |
+| 2.5D 单测 | `tests/test_heightmap_2d5.cpp` | 平地/凸起台阶/沟坑/fail-closed (`ctest`，P1.5) |
 | 真机建图工具 | `tools/mapping_real_test.cpp` | Windows 真机验证工具：Astra 真深度→全管线→PGM（静止校验 + 旋转扫描模式） |
 
 ## 点云模块（P0）
@@ -152,6 +154,72 @@ build_real/Release/mapping_real_test.exe 150 map_sweep.pgm 360 5
 - 单次累积无回环校正：cmd_vel 开环积分 odom 长距离会漂移（10m 场地内可接受）
 - 地面点未过滤：P1 地面分割结果尚未接入建图入口（接入后可消除地面假占据）
 - 10×10m 固定窗口（`MapConfig`），大场地需参数化
+
+## 2.5D 近场地形（P1.5）
+
+单平面 2.5D 高程/可通行地形，基于 P1 地面分割（复用其 `GroundSegResult.plane`），把 base 系点云组织成「每格一个高度 + 可通行标签」的栅格，用于**近场越障判断**（台阶/沟/坡能不能走）。与 P1 的分工：P1 只判"有没有坑"（负障碍），本模块补全**正障碍（凸起）+ 每格高度 + 完整可通行标签**。
+
+> 定位：**2D 雷达扫不到地面高度变化**（只扫一个水平面），深度相机天然看 3D 体积 + 地表，是越障（台阶/沟/坡）的**核心传感器**。这也是工业巡检越障场景下 2.5D 的意义所在——2D 雷达只负责全局导航，深度相机负责近场越障地形。
+
+### 输出语义（每格）
+
+| 标签 | 含义 | 触发条件 |
+|------|------|---------|
+| `Traversable` | 能走 | 与参考地面高度差在容忍内 |
+| `ObstacleUp` | 凸起障碍 | 高于地面 > `step_up_max`（默认 10cm） |
+| `CliffDown` | 沟/下行台阶 | 低于地面 > `drop_down_max`（默认 15cm） |
+| `TooSteep` | 坡过陡 | 平面坡度 > `slope_max`（默认 20°） |
+| `Unknown` | 未扫到 | 该格无样本 |
+
+阈值默认取保守值（`HeightMap25Config`），可按机械狗越障能力实测调。v1 边界：**单平面假设**（与 P1 一致），不处理多层平台（将来升级 `elevation_mapping`）。
+
+### 核心接口
+
+```cpp
+mechdog::HeightMap25Result hm;
+mechdog::HeightMap25Config cfg;   // step_up_max / drop_down_max / slope_max 等
+build_heightmap_25(cloud_base, seg, cfg, hm);   // seg 为 P1 segment_ground 结果
+// hm.flag[cell] : CellFlag 枚举; hm.height[cell] : 该格参考地面高度
+```
+
+### 真机建图/2.5D 可视化（Windows）
+
+```bash
+# 真机构建 (USE_ASTRA_SDK=ON) 后, 先把 SDK bin 加进 PATH:
+#   $env:PATH = "<SDK根目录>\bin;" + $env:PATH
+
+# 真机 + 建图可视化 (占据图+轨迹), 静止位姿, 采 25 帧后自动存 PGM
+./mechdog_navigation.exe --real --map --frame-n 25 --cloud
+
+# 真机 + 旋转扫描 360° (匀速假设, 非精确)
+./mechdog_navigation.exe --real --map --sweep 360 --frame-n 80 --cloud
+
+# 真机 + 2.5D 近场地形 (需要相机外参标定)
+./mechdog_navigation.exe --real --hm25 --pitch <俯角> --height <离地高> --cloud
+```
+
+命令行参数（可视化）：
+
+| 参数 | 含义 | 默认 |
+|------|------|------|
+| `--real` | 真机模式（Astra SDK） | 模拟 |
+| `--map` | 建图可视化（占据图+轨迹） | 关 |
+| `--hm25` | 2.5D 近场地形可视化 | 关 |
+| `--cloud` | 点云可视化（`--map`/`--hm25` 会隐式开启） | 关 |
+| `--frame-n <N>` | 采 N 帧后冻结地图并存 PGM（0=无限） | 无限 |
+| `--sweep <deg>` | 原地旋转扫描（位姿按帧序匀速推进） | 0（静止） |
+| `--static` | 显式静止位姿 | 开 |
+| `--pitch <deg>` | 相机前俯角（2.5D 标定用） | 15 |
+| `--height <m>` | 相机离地高（2.5D 标定用） | 0.18 |
+
+### 可视化窗口（三栏：彩色帧 | 点云 | 右栏）
+
+- **`--map`**：右栏 = 2.5D 时显示地形，否则显示 P4 占据图 + 轨迹（青=轨迹线，黄=机头）
+- **`--hm25`**：右栏 = 2.5D 地形（**绿=能走 / 橙=凸起 / 红=沟坑 / 蓝=太陡 / 灰=未知**）
+
+### 真机实测（2026-09）
+
+Astra 相机深度流正常（30fps），真机深度 → 反投影 → 建图（P4）→ PGM 全链路跑通；`--sweep 360` 扫出真实环境 360° 环形占据图（occ=5860 / free=26786）。**2.5D 当前依赖相机外参标定** —— 相机尚未装到机械狗、外参用占位值（`z=0.18, pitch=+15°`）时点云坐标系偏移，2.5D 待相机装机后实测 `--pitch/--height` 标定验证。详见 `docs/REAL_MAPPING_GUIDE.md`。
 
 ## 传感器融合策略
 
@@ -257,8 +325,8 @@ cmake --build .
 1. **Astra SDK 真机深度已实现** — 经 `USE_ASTRA_SDK` 编译后 `capture_frame()` 走 FrameListener 真机分支（深度+彩色双流）；未编译时回退模拟模式
 2. **环境红外阈值待标定** — `IrConfig` 为软件预设默认值，需硬件组按 `docs/IR_CALIBRATION.md` 实测后更新
 3. **wiringPi 真机 GPIO 未验证** — `measure_distance()` 的轮询实现受 Linux 调度抖动影响（1ms ≈ 17cm），后续可改边沿中断+时间戳
-4. **点云外参未标定** — P0 用 FOV 反推内参 + 外参占位初值（`x=0.12, y=0, z=0.18, pitch=+15°`）；狗未装机时按 §18.4 用零外参临时摆放联调，装机后需按 `docs/POINT_CLOUD_DESIGN.md` §12 量测 + 标定
-5. **点云地面分割/聚类/占据栅格未实现** — 属 P1/P2（`docs/POINT_CLOUD_DESIGN.md` §16 落地路线），当前 P0 仅反投影 + 坐标变换
+4. **点云外参未标定（2.5D 依赖）** — P0 用 FOV 反推内参 + 外参占位初值（`x=0.12, y=0, z=0.18, pitch=+15°`）；狗未装机时按 §18.4 用零外参临时摆放联调，装机后需按 `docs/POINT_CLOUD_DESIGN.md` §12 量测 + 标定；**P1.5 的 2.5D 地形对外参尤其敏感**，外参不准时点云坐标系偏移（实测 y 偏到 -7.8m），2.5D 全 unknown。已提供 `--pitch/--height` 命令行实机调参，相机装机后需实测标定。
+5. **2.5D 待相机标定验证** — `heightmap_2d5` 已实现（单平面）且单测全绿，但**真机 2.5D 依赖相机外参标定**；相机未装到机械狗前点云坐标偏移，2.5D 无法正确分类。相机装机实测 `--pitch/--height` 后即可验证。
 6. **Astra Pro 水平 FOV 仅 58.4°** — 点云俯视图因此呈中心扇形，属硬件物理限制，非代码问题
 7. **前向全盲时降速盲行而非停车（接真机前必须确认）** — Astra 三区域均无有效深度像素**且**三颗前向超声全部无效时，`determine_action`（`sensor_fusion.cpp`）返回 `SLOW_FORWARD`（0.5×v_max ≈ 0.1 m/s 盲目前进），仅靠 bottom 悬崖检测兜底；该行为有 `test_front_blind_with_bottom_valid_is_conservative` 测试锁定。**设计前提是全局层（师兄安全闸门 / Nav2）对该场景另有兜底** —— 接机械狗实机前务必与师兄确认闸门已覆盖；若本层是最后防线，应把该分支改为 `STOP`，避免镜头被挡 + 前向超声全坏时低速撞上静止障碍物。
 
@@ -279,6 +347,17 @@ cmake --build .
 | `M` | 深度图水平镜像开关（诊断用；默认关 = 正确方向，开启后热力/点云会偏离实物） |
 | `D` | 深度热力图叠加 RGB（近=红 远=蓝；左右对齐裁决工具，红点应落在实际近处物体上） |
 | `--ground <h>` | 手持实验模式：外参归零（base==link）、地面先验 = -h、窗口收紧 0.12；装机后勿用 |
+
+### 可视化命令行参数（建图/2.5D）
+
+| 参数 | 功能 |
+|---|---|
+| `--map` | 建图可视化（占据图 + 轨迹，`--sweep` 旋转扫描） |
+| `--hm25` | 2.5D 近场地形可视化（绿=能走/橙=凸起/红=沟坑/蓝=陡/灰=未知） |
+| `--cloud` | 点云可视化（`--map`/`--hm25` 会自动开启） |
+| `--frame-n <N>` | 采 N 帧后冻结地图并存 PGM |
+| `--sweep <deg>` | 原地旋转扫描（位姿匀速假设） |
+| `--pitch <deg>` / `--height <m>` | 2.5D 相机外参实机标定 |
 
 ## License
 
