@@ -45,6 +45,7 @@
 | 地面分割 | `ground_segmentation.h/.cpp` | 受约束 RANSAC 地面平面 + 2.5D 栅格**负障碍检测**（坑/下行台阶，P1；门口试金石单测锁定） |
 | 建图模块 | `mapping.h/.cpp` | 位姿驱动点云累积 → log-odds 占据栅格 + 光线空闲 + 膨胀 + PGM 导出（P4） |
 | 2.5D 近场地形 | `heightmap_2d5.h/.cpp` | 单平面 2.5D 高程/可通行地形 → 越障判断（能走/凸起/沟坑/太陡，P1.5；复用 P1 地面平面） |
+| 日志系统 | `logger.h` | 分级日志 DEBUG/INFO/WARN/ERROR + 时间戳 + 可选写文件（header-only，零依赖） |
 | 路径规划 | `path_planner.h/.cpp` | 导航动作 -> 速度指令映射（DWA 待实现） |
 | 单元测试 | `tests/test_fusion.cpp` | F4/F5 回归 + 融合逻辑验证 (`ctest`) |
 | 点云单测 | `tests/test_point_cloud.cpp` | 反投影/坐标变换/失效哨兵验证 (`ctest`，P0) |
@@ -358,6 +359,44 @@ cmake --build .
 | `--frame-n <N>` | 采 N 帧后冻结地图并存 PGM |
 | `--sweep <deg>` | 原地旋转扫描（位姿匀速假设） |
 | `--pitch <deg>` / `--height <m>` | 2.5D 相机外参实机标定 |
+| `--log-level <D/I/W/E>` | 日志级别（默认 INFO） |
+| `--log-file <path>` | 把日志写入文件（差错用） |
+
+## 日志系统
+
+程序内置分级日志（`logger.h`，header-only，零依赖），替代零散的 `std::cout` 打印，方便差错。每条日志自动带前缀：`[时间戳][级别][文件名:行号]`。
+
+### 功能
+
+- **分级**：`DEBUG` / `INFO` / `WARN` / `ERROR`
+- **时间戳**：`年-月-日 时:分:秒`
+- **定位**：自动附 `文件名:行号`，出错直接定位代码行
+- **输出**：控制台 + 可选写文件
+
+### 用法
+
+```bash
+# 默认 INFO 级别，控制台输出
+./mechdog_navigation.exe --real --map
+
+# 调 DEBUG 级别 + 写日志文件（差错调试用，推荐）
+./mechdog_navigation.exe --real --map --log-level D --log-file run.log
+
+# 只看警告/错误（减少输出）
+./mechdog_navigation.exe --real --log-level W
+```
+
+### 日志示例（实测）
+
+```
+[2026-09-05 15:02:27][INFO][main.cpp:1064] [P4] 建图可视化: 位姿=静止原点, 采集 8 帧后停
+[2026-09-05 15:02:30][INFO][main.cpp:1253] [P4] 已采集 8 帧, 地图冻结. PGM 已保存: mechdog_map_live.pgm
+[2026-09-05 15:02:30][INFO][main.cpp:1254] [P4] map 200x200 res=0.05m  unknown=... free=... occ=...
+```
+
+建图（P4）、2.5D（hm25）的关键结果都走 `LOG_*` 记录，以后排查问题直接看日志文件即可。
+
+> 注：Windows 控制台可能显示中文乱码（GBK/UTF-8 编码差异），日志文件内是正确 UTF-8。若需日志文件带中文说明，建议用 `--log-file` 并查看文件（非控制台）。
 
 ## License
 
