@@ -24,6 +24,7 @@
 #include "ground_segmentation.h"
 #include "mapping.h"
 #include "heightmap_2d5.h"
+#include "logger.h"
 
 #include <chrono>
 #include <csignal>
@@ -99,7 +100,7 @@ static std::atomic<int> g_map_max_frames{0};
 static int g_map_frame_count = 0;
 static std::atomic<bool> g_map_saved{false};  // 采集上限达到后已保存 PGM (防重复)
 // 建图器 (P4 OccupancyGridMap; 主循环 insert_cloud 写, 窗口线程读 g_map_snapshot)
-static mechdog::OccupancyGridMap g_mapper(0.25);
+static mechdog::OccupancyGridMap g_mapper(mechdog::MapConfig{}, 0.25);
 // ---- P1.5 2.5D 近场地形 (--hm25 开启; 主循环 build_heightmap_25 写, 窗口读 g_hm25_snapshot) ----
 static bool g_enable_hm25 = false;
 struct Hm25Snapshot {
@@ -939,6 +940,12 @@ int main(int argc, char** argv) {
 #endif
     std::signal(SIGINT, on_signal);
 
+    // ---- 日志系统初始化 (分级+时间戳, 可选写文件) ----
+    // 默认级别 INFO, 输出控制台; --log-level <D|I|W|E> 调级别; --log-file <path> 写文件
+    using mechdog::log::Level;
+    mechdog::log::set_level(Level::Info);
+    std::string log_file_path;   // 空 = 不写文件
+
     // 命令行参数: --real 使用真机 (Astra SDK + 真实红外), 默认模拟模式
     //             --cloud 点云可视化 (深度图反投影, 俯视图)
     bool use_real = false;
@@ -985,6 +992,26 @@ int main(int argc, char** argv) {
         if (arg == "--height" && i + 1 < argc) {        // 相机离地高(米), 实机标定点云用
             extr_height_m = atof(argv[++i]);
         }
+        if (arg == "--log-level" && i + 1 < argc) {     // 日志级别 D/I/W/E
+            std::string lv(argv[++i]);
+            if (lv == "D" || lv == "DEBUG")      mechdog::log::set_level(Level::Debug);
+            else if (lv == "I" || lv == "INFO")  mechdog::log::set_level(Level::Info);
+            else if (lv == "W" || lv == "WARN")  mechdog::log::set_level(Level::Warn);
+            else if (lv == "E" || lv == "ERROR") mechdog::log::set_level(Level::Error);
+            else { std::cout << "[--log-level] 未知级别: " << lv << " (用 D/I/W/E)" << std::endl; }
+        }
+        if (arg == "--log-file" && i + 1 < argc) {      // 日志文件路径
+            log_file_path = argv[++i];
+        }
+    }
+
+    // 开写文件日志 (若指定 --log-file)
+    if (!log_file_path.empty()) {
+        if (mechdog::log::set_log_file(log_file_path)) {
+            LOG_INFO("日志已写入文件: " << log_file_path);
+        } else {
+            std::cout << "[WARN] 无法打开日志文件: " << log_file_path << std::endl;
+        }
     }
 
     // 建图/2.5D 可视化依赖点云视图/点云管线 (建图段在 show_cloud 内生成 cloud_base),
@@ -1030,11 +1057,11 @@ int main(int argc, char** argv) {
     g_map_max_frames = map_max_frames;
     if (enable_mapping) {
         g_current_pose = mechdog::Pose2D{};  // 初始位姿: 原点朝 +x
-        std::cout << "[P4] 建图可视化: 位姿="
-                  << (sweep_mode ? "原地旋转扫描 " + std::to_string(sweep_deg) + "°"
-                                 : "静止原点")
-                  << (map_max_frames > 0 ? ", 采集 " + std::to_string(map_max_frames) + " 帧后停"
-                                         : "") << std::endl;
+        LOG_INFO("[P4] 建图可视化: 位姿="
+                 << (sweep_mode ? "原地旋转扫描 " + std::to_string(sweep_deg) + "°"
+                                : "静止原点")
+                 << (map_max_frames > 0 ? ", 采集 " + std::to_string(map_max_frames) + " 帧后停"
+                                        : ""));
     }
     // 启动可视化窗口线程 (--noviz 可禁用, 用于定位崩溃)
     if (!no_viz) {
@@ -1044,11 +1071,11 @@ int main(int argc, char** argv) {
 
     astra.start();
 
-    std::cout << "=== mechdog_navigation "
-              << (use_real ? "真机模式 (Astra SDK)" : "模拟模式")
-              << (show_cloud ? " + 点云可视化" : "")
-              << " (带可视化窗口) ===" << std::endl;
-    std::cout << "关闭可视化窗口 或 Ctrl+C 退出" << std::endl << std::endl;
+    LOG_INFO("=== mechdog_navigation "
+             << (use_real ? "真机模式 (Astra SDK)" : "模拟模式")
+             << (show_cloud ? " + 点云可视化" : "")
+             << " (带可视化窗口) ===");
+    LOG_INFO("关闭可视化窗口 或 Ctrl+C 退出");
 
     CameraIntrinsics cloud_K;       // FOV 反推内参 (真机可后续补 SDK 直读)
     CameraExtrinsics cloud_E;       // 外参初值 (装机后量测)
@@ -1167,7 +1194,7 @@ int main(int argc, char** argv) {
                     if (!hm25_diag_once) {
                         hm25_diag_once = true;
                         if (cloud_base.points.empty()) {
-                            std::cout << "[hm25] cloud_base EMPTY" << std::endl;
+                            LOG_WARN("[hm25] cloud_base EMPTY");
                         } else {
                             double x0=1e9,x1=-1e9,y0=1e9,y1=-1e9,z0=1e9,z1=-1e9;
                             for (auto& pt : cloud_base.points) {
@@ -1175,18 +1202,18 @@ int main(int argc, char** argv) {
                                 y0=(std::min)(y0,pt.y); y1=(std::max)(y1,pt.y);
                                 z0=(std::min)(z0,pt.z); z1=(std::max)(z1,pt.z);
                             }
-                            std::cout << "[hm25] pts=" << cloud_base.points.size()
-                                      << " x[" << x0 << "," << x1 << "]"
-                                      << " y[" << y0 << "," << y1 << "]"
-                                      << " z[" << z0 << "," << z1 << "]"
-                                      << " plane=" << seg.plane.valid << std::endl;
+                            LOG_INFO("[hm25] pts=" << cloud_base.points.size()
+                                     << " x[" << x0 << "," << x1 << "]"
+                                     << " y[" << y0 << "," << y1 << "]"
+                                     << " z[" << z0 << "," << z1 << "]"
+                                     << " plane=" << seg.plane.valid);
                         }
                     }
                     HeightMap25Result hm;
                     HeightMap25Config hcfg;
                     build_heightmap_25(cloud_base, seg, hcfg, hm);
-                    if (hm.valid) std::cout << "[hm25] " << hm.stats() << std::endl;
-                    else std::cout << "[hm25] invalid (no ground plane)" << std::endl;
+                    if (hm.valid) LOG_INFO("[hm25] " << hm.stats());
+                    else LOG_WARN("[hm25] invalid (no ground plane)");
                     std::lock_guard<std::mutex> lock2(g_viz_mutex);
                     g_hm25_snapshot.valid = hm.valid;
                     g_hm25_snapshot.cols = hm.cols;
@@ -1221,11 +1248,10 @@ int main(int argc, char** argv) {
                         g_map_saved.store(true);
                         const std::string pgm_path = "mechdog_map_live.pgm";
                         const bool ok = g_mapper.save_pgm(pgm_path);
-                        std::cout << "[P4] 已采集 " << g_map_max_frames
-                                  << " 帧, 地图冻结. PGM "
-                                  << (ok ? "已保存: " + pgm_path
-                                         : "保存失败") << std::endl;
-                        std::cout << "[P4] " << g_mapper.stats() << std::endl;
+                        LOG_INFO("[P4] 已采集 " << g_map_max_frames
+                                 << " 帧, 地图冻结. PGM "
+                                 << (ok ? "已保存: " + pgm_path : "保存失败"));
+                        LOG_INFO("[P4] " << g_mapper.stats());
                     }
 
                     // 生成栅格快照 (拷贝 occ_state 摘要, 窗口线程读)
