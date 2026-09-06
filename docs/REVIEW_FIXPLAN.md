@@ -21,7 +21,7 @@
 | R1 | ✅ 已修正 | c2617b6 `sensor_fusion.h` 头部注释改为"深度图代理默认 + 可选 IR 增强" |
 | R2 | ✅ 已修正 | c2617b6 `sensor_ultrasonic.cpp` 前向刷新率注释按调用方节流标注（3.8Hz / ROS 10Hz） |
 | R3 | ✅ 已修正 | c2617b6 `sensor_astra.cpp` "维持 30fps" → "取帧耗时约束 ≤20fps"（两处） |
-| R4 | ✅ 按设计保留（文档注明） | 首帧急停=启动即验证 fail-closed；预热屏蔽反而使首个有效消息延迟至 ~435ms、逼近上游闸门 0.5s 超时（见下详述） |
+| R4 | ✅ 已改为启动预热（等 bottom 首帧再首轮 fuse） | 6c2732c 算法库 `is_bottom_ready()` + b732f78 `safety_node` `warmup_ms` 预热 + 集成测试 `WarmupWaitsForBottomReady`；不屏蔽 STOP、不放松 fail-closed |
 | R5 | ✅ 已核对 + 集成测试 | b003845 safety_node 消费路径无自行 reinterpret；新增 `test/test_safety_fail_closed.cpp` 全链路注入断言 STOP/零速 |
 
 ---
@@ -56,7 +56,7 @@
 | 1 | R1 | 过时注释仍写"TSL2591 环境红外"（F3 已取消购买） | 🟢 质量 | sensor_fusion.h | ✅ c2617b6 |
 | 2 | R2 | 前向刷新率注释误导（称 16Hz，主循环 200ms 下实际 ~3.8Hz） | 🟢 质量 | sensor_ultrasonic.cpp | ✅ c2617b6 |
 | 3 | R3 | ALG-7 注释"30fps"与真机实测 ≤20fps 不符 | 🟢 质量 | sensor_astra.cpp | ✅ c2617b6 |
-| 4 | R4 | 启动期 fail-closed 首帧必 STOP ~150ms（ROS 接入时序建议） | 🟡 设计 | ROS 胶水包 / main.cpp | ✅ 按设计保留（文档注明） |
+| 4 | R4 | 启动期 fail-closed 首帧必 STOP ~150ms（ROS 接入时序建议） | 🟡 设计 | ROS 胶水包 / main.cpp | ✅ b732f78 已改启动预热 |
 | 5 | R5 | ROS 胶水包落后 v2.3 4 提交，需核对 safety_node 是否按新 fail-closed 语义消费 `FusionResult` | 🟠 跨仓库一致性 | mechdog_navigation_ros | ✅ b003845 |
 
 ---
@@ -114,13 +114,13 @@
 - 或在 ROS `safety_node` 层对启动后首个 ~200ms 的 `STOP` 做"预热屏蔽"（仅屏蔽首次，后续 fail-closed 仍生效）。
 - 若认为首帧急停可接受（安全优先），本条标记为"按设计保留"，无需改代码。
 
-**落实**：✅ 按设计保留（本轮决策, 2026-08）—— 理由：
-1. 首帧急停是"启动即验证 fail-closed"：机器人启动时通常静止，上游闸门（`cmd_vel_safety_gate_node`）对首个 `cmd_vel` 也有 0.5s 超时兜底，一帧 STOP 无实害；
-2. 若加"预热屏蔽"（屏蔽首个 200ms STOP）等价于在启动窗口内放松 fail-closed 语义，与本次 review 主题（杜绝 fail-open 重现）相悖；
-3. 若采用"延迟首次 fuse()"（等 bottom 首帧）：真机首个 `fuse()` ≈ 300ms 预热 + ~135ms 取帧 ≈ 435ms 才产出首个结果，距闸门 0.5s 首消息超时仅 ~65ms 裕量，调度抖动即触发假性零速 —— 得不偿失；
-4. 日后若真机多次观察到"重启急停造成困扰"，正确路径是感知层 warm-up（等 bottom 线程首帧再开始走，而非屏蔽 STOP），届时再评估。
+**落实**：✅ 已改为"启动预热"（用户采纳, 2026-08）—— 不屏蔽 STOP、不放松 fail-closed，仅把首帧融合时序前置：
+1. **算法库**（6c2732c）：`UltrasonicArrayDriver::is_bottom_ready()` —— 底部线程是否已产出首帧；
+2. **ROS 胶水包**（b732f78）：新增 `src/safety_warmup.hpp::wait_for_bottom_ready(有界超时)`，`safety_node` 融合线程启动时先等 bottom 就绪（`warmup_ms` 参数, 默认 250ms, 就绪即返）再首轮 `fuse()`；
+3. **为何不选"屏蔽首个 STOP"**：屏蔽等于在启动窗口内放松 fail-closed，与本 review 主题（杜绝 fail-open 重现）相悖；"延迟固定首帧"（300ms 无论就绪与否）则可能把首个消息推迟到 ~435ms、逼近闸门 0.5s 超时。**等待就绪**（sim 下通常 ~50-150ms）既消除误急停，又不像屏蔽那样牺牲安全语义；
+4. 超时（bottom 迟迟不就绪）仍继续，由后续 `is_fall_risk()` fail-closed 兜底 —— 不阻塞启动、不引入假零速。
 
-**验收**：按设计保留，仅在文档注明。✅ 本文档即验收记录；不改代码、不动 fail-closed 语义。
+**验收**：✅ 新增"预热期"单测 `SafetyFailClosed::WarmupWaitsForBottomReady`（sim bottom 在 2s 预算内必就绪）；全 3 gtest 用例绿，colcon 2 包构建成功；算法库回归 677 绿.
 
 ---
 
@@ -166,7 +166,7 @@ ROS 侧 `safety_node` 若仍按旧逻辑消费 `FusionResult`（例如把 `min_f
 |------|------|------|------|
 | 1 | R1 / R2 / R3 | 纯注释修正，零风险，顺手合入 | ✅ 已合入 c2617b6 |
 | 2 | R5 | 跨仓库一致性是**唯一可能让 v2.3 安全修复失效**的路径，优先级最高需排查 | ✅ 已排查 + 集成测试 b003845 |
-| 3 | R4 | 设计知会，按安全优先可"按设计保留"，仅在 ROS 集成时处理 | ✅ 按设计保留（文档注明） |
+| 3 | R4 | 设计知会，按安全优先可"按设计保留"，仅在 ROS 集成时处理 | ✅ 已改启动预热 b732f78（用户采纳） |
 
 ---
 
@@ -178,4 +178,4 @@ ROS 侧 `safety_node` 若仍按旧逻辑消费 `FusionResult`（例如把 `min_f
 
 ## 本轮跟进结论（2026-08, R1~R5 全部闭环）
 
-R1/R2/R3 纯注释修正零风险合入；R4 按设计保留（首帧急停=启动即验证 fail-closed，且"预热屏蔽/延迟首帧"均会引入上游 0.5s 超时风险）；R5 排查确认 safety_node 消费路径无 fail-open 重现，并以跨层集成测试固化（全失效注入 → STOP → 零速 + 8.0 兜底永不 FORWARD 回归护栏）。**v2.3 安全语义自算法库至 ROS 输出全链路闭合，可放心推进硬件阶段。**
+R1/R2/R3 纯注释修正零风险合入；R4 改为**启动预热**（用户采纳：算法库 `is_bottom_ready()` + `safety_node` 等 bottom 首帧再首轮 fuse —— 不屏蔽 STOP、不放松 fail-closed，仅把首帧融合时序前置，消除启动期一帧误急停）；R5 排查确认 safety_node 消费路径无 fail-open 重现，并以跨层集成测试固化（全失效注入 → STOP → 零速 + 8.0 兜底永不 FORWARD 回归护栏）。**v2.3 安全语义自算法库至 ROS 输出全链路闭合，可放心推进硬件阶段。**
