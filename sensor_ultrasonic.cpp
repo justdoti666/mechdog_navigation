@@ -223,6 +223,20 @@ void UltrasonicArrayDriver::stop_bottom() {
 }
 
 UltrasonicArrayData UltrasonicArrayDriver::read_all() {
+    // ---- 方案A: 有外部注入且新鲜 -> 直接用 (ROS2 ultrasonic_node 数据) ----
+    {
+        std::lock_guard<std::mutex> lock(read_mutex_);
+        if (have_external_) {
+            const auto age = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - external_t_).count();
+            if (age <= inject_timeout_sec_) {
+                return external_data_;
+            }
+            // 过期: 回退内部读取 (日志提示由调用方负责, 这里静默回退)
+            have_external_ = false;
+        }
+    }
+
     UltrasonicArrayData data;
     data.timestamp = std::chrono::duration<double>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -259,6 +273,19 @@ UltrasonicArrayData UltrasonicArrayDriver::read_all() {
     data.front_right  = read_sensor("front_right");
 
     return data;
+}
+
+// ---- 方案A: 外部超声波数据注入 ----
+void UltrasonicArrayDriver::inject_external_data(const UltrasonicArrayData& data) {
+    std::lock_guard<std::mutex> lock(read_mutex_);
+    external_data_ = data;
+    external_t_ = std::chrono::steady_clock::now();
+    have_external_ = true;
+}
+
+bool UltrasonicArrayDriver::has_external_data() const {
+    std::lock_guard<std::mutex> lock(read_mutex_);
+    return have_external_;
 }
 
 void UltrasonicArrayDriver::cleanup() {

@@ -94,12 +94,25 @@ public:
      *  底部已移至独立 20Hz 线程 (is_fall_risk), data.bottom 由 get_bottom_reading 缓存填充 */
     UltrasonicArrayData read_all();
 
+    // ---- 方案A: 外部超声波数据注入 (ROS2 ultrasonic_node 发布 /ultrasonic 后由搭桥节点调用) ----
+    // 注入后 read_all() 优先返回注入缓存 (替代内部 GPIO/模拟读取), 用于 ROS2 胶水层对接。
+    // 未注入 / 注入过期 (> inject_timeout_sec) 时回退原内部读取 (fail-safe)。
+    void inject_external_data(const UltrasonicArrayData& data);
+    void set_inject_timeout_sec(double sec) { inject_timeout_sec_ = sec; }
+    bool has_external_data() const;
+
     /** 清理所有传感器资源 */
     void cleanup();
 
 private:
     std::unordered_map<std::string, std::unique_ptr<UltrasonicSensor>> sensors_;
-    std::mutex read_mutex_;
+    mutable std::mutex read_mutex_;   // mutable: const 访问器 (has_external_data) 判注入状态
+
+    // ---- 方案A: 外部注入缓存 (ultrasonic_node 数据; read_all 优先用) ----
+    UltrasonicArrayData external_data_;
+    bool have_external_ = false;
+    std::chrono::steady_clock::time_point external_t_{};   // 注入时间 (判过期)
+    double inject_timeout_sec_ = 1.0;                      // 注入数据新鲜度上限 (秒)
 
     // ---- ALG-1 (v2.2): 底部独立高频通路 (F9) ----
     UltrasonicSensor* bottom_sensor_ = nullptr;   // 指向 sensors_["bottom"] (构造时取出, 生命周期随 sensors_)
