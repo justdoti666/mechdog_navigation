@@ -68,6 +68,9 @@ struct UltrasonicSensorEntry {
 };
 
 // ALG-10 (v2.2): 返回 const 引用 + 局部 static, 避免每次调用按值构造 unordered_map
+// 引脚为 BCM GPIO 号 (= libgpiod line offset, 非 WiringPi 号); 物理排针号:
+//   front_left=Pin16/18, front_center=Pin11/13, front_right=Pin29/31, bottom=Pin33/35
+// 接线定稿见 mechdog_navigation_ros/docs/ULTRASONIC_WIRING.md
 inline const std::unordered_map<std::string, UltrasonicSensorEntry>& get_ultrasonic_layout() {
     static const std::unordered_map<std::string, UltrasonicSensorEntry> layout = {
         {"front_left",  {1, "左前",  -30.0, 0.0,  23, 24, "覆盖左前方盲区"}},
