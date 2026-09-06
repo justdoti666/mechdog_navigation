@@ -64,8 +64,9 @@ void AstraProDriver::stop() {
 
 void AstraProDriver::capture_loop() {
     // ALG-7 (v2.2): 按本帧实际耗时补偿 sleep, 替代固定 33ms 双重节流
-    // (capture_real 内 10×5ms 轮询已耗时; 固定 33ms 叠加会让真机跌破 30fps)
-    const auto frame_period = std::chrono::milliseconds(1000 / DEPTH_FPS);  // ~33ms @30fps
+    // (capture_real 内 10×5ms 轮询已耗时 ~50ms, 超帧周期 33ms → 真机实际 ≤20fps;
+    //  补偿仅在取帧 <33ms 时生效, 真机下通常不 sleep —— 帧率受 SDK 取帧耗时约束)
+    const auto frame_period = std::chrono::milliseconds(1000 / DEPTH_FPS);  // ~33ms @30fps (名义值)
     while (running_) {
         auto t0 = std::chrono::steady_clock::now();
         auto frame = capture_frame();
@@ -199,7 +200,7 @@ AstraFrame AstraProDriver::capture_real() {
         // (此前 50ms 窗口轮询真机实测恒报 no new frame —— 已定位为查询方式问题。)
         bool got = false;
         const auto wait_until = std::chrono::steady_clock::now()
-                                + std::chrono::milliseconds(80);   // 覆盖当前帧周期(33ms)
+                                + std::chrono::milliseconds(80);   // 覆盖当前帧周期(名义33ms; 真机取帧~50ms亦有裕量)
         std::unique_ptr<astra::Frame> aframe;
         do {
             astra_update();

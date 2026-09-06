@@ -1,6 +1,8 @@
 /**
  * 多传感器数据融合模块 (C++ 版)
- * 融合 Astra Pro 深度相机 + HC-SR04 超声波传感器阵列 + TSL2591 环境红外
+ * 融合 Astra Pro 深度相机 + HC-SR04 超声波传感器阵列
+ * 环境光强: 默认深度图代理 estimate_ambient_light() (TSL2591 已取消购买, 见 config.h F3 决策),
+ *           sensor_ir 仅作可选增强 (模拟模式可用, 真机 I2C 分支待硬件)
  */
 #pragma once
 

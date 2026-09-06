@@ -254,7 +254,9 @@ UltrasonicArrayData UltrasonicArrayDriver::read_all() {
 
     // 分时轮询前向 3 颗：固定顺序依次触发，每颗间隔 30ms 避免串扰
     // 原因：HC-SR04 最大回波时间 ~25ms，间隔 ≥30ms 确保前一颗回波完全衰减
-    // 3 颗完整一轮 ~60ms → 更新率约 16Hz (底部已独立 20Hz, 见 is_fall_risk)
+    // 3 颗完整一轮 ~60ms → 连续调用时 ~16Hz; 但受调用方节流影响:
+    //   main.cpp 主循环 200ms → 前向实际 ~3.8Hz; ROS 融合线程 100ms 门控 → ~10Hz
+    // 底部独立 20Hz 不受影响 (见 is_fall_risk)
     static constexpr double CROSSTALK_GAP_MS = 30.0;
 
     auto read_sensor = [&](const std::string& key) -> UltrasonicReading {
