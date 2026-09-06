@@ -204,7 +204,23 @@ void UltrasonicArrayDriver::bottom_loop() {
 
 // ALG-1 (v2.2): fail-closed 跌落风险判定, 沿用 F4 get_cliff_detected 语义:
 // 无数据 / 无效读数 / 距离 > 阈值 一律判有风险 (宁可误判不漏判)。
+// 方案A: 外部注入数据新鲜时**优先用注入的 bottom** (ROS/STM32 上报是真实数据源),
+// 与 read_all() 同口径 (注入优先, 过期回退内部); 仅供注入与内部线程读数不一致时
+// 仍以外部上报为准 (否则真机 cliff 判定会落到内部模拟/GPIO 直读上)。
 bool UltrasonicArrayDriver::is_fall_risk() const {
+    // 方案A: 注入新鲜 -> 用注入 bottom 判定 (与 read_all 同一 timeout 口径)
+    {
+        std::lock_guard<std::mutex> lk(read_mutex_);   // mutable: const 访问器
+        if (have_external_) {
+            const auto age = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - external_t_).count();
+            if (age <= inject_timeout_sec_) {
+                const auto& b = external_data_.bottom;
+                return !b.valid || b.distance_cm > UltrasonicConfig::cliff_threshold_cm;
+            }
+            // 过期: 回退内部读取 (have_external_ 由 read_all 下一次命中时清零, const 方法不写)
+        }
+    }
     if (!bottom_have_.load()) return true;  // 线程未就绪 (启动初/无 bottom 传感器) -> 有风险
     std::lock_guard<std::mutex> lk(bottom_mutex_);
     const auto& b = bottom_latest_;

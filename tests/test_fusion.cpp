@@ -583,6 +583,39 @@ static void test_is_fall_risk_fail_closed() {
     CHECK(ultrasonic.is_fall_risk() == expected);
 }
 
+// 方案A (REVIEW): is_fall_risk 必须**优先用注入的 bottom** —— 外部注入 (ROS /ultrasonic,
+// 后续为 STM32 捕获上报) 是真实数据源; 内部 bottom 线程在 ROS 编译下是模拟/占位, 不注入
+// 时才会回退。修复前: cliff 判定无视注入数据, 真机防跌落到模拟读数上 (fail-open 缺口)。
+static void test_is_fall_risk_uses_injected_bottom() {
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+
+    // 1) 注入底部安全距离 (15cm < 阈值) -> 无风险 (即使内部线程尚未产出首读)
+    UltrasonicArrayData safe;
+    safe.bottom.valid = true; safe.bottom.distance_cm = 15.0;
+    ultrasonic.inject_external_data(safe);
+    CHECK(ultrasonic.is_fall_risk() == false);
+
+    // 2) 注入底部无效 -> fail-closed 有风险
+    UltrasonicArrayData bad;
+    bad.bottom.valid = false; bad.bottom.distance_cm = 400.0;
+    ultrasonic.inject_external_data(bad);
+    CHECK(ultrasonic.is_fall_risk() == true);
+
+    // 3) 注入底部超阈值 (悬崖) -> 有风险
+    UltrasonicArrayData cliff;
+    cliff.bottom.valid = true;
+    cliff.bottom.distance_cm = UltrasonicConfig::cliff_threshold_cm + 10.0;
+    ultrasonic.inject_external_data(cliff);
+    CHECK(ultrasonic.is_fall_risk() == true);
+
+    // 4) 注入过期 (timeout=0) 后回退内部线程口径 (与 read_all 同语义)
+    ultrasonic.set_inject_timeout_sec(0.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    UltrasonicReading br = ultrasonic.get_bottom_reading();
+    bool expected = !br.valid || br.distance_cm > UltrasonicConfig::cliff_threshold_cm;
+    CHECK(ultrasonic.is_fall_risk() == expected);
+}
+
 // ALG-4 (v2.2): 真机硬件失败 (hw_unavailable_) 不返回随机值, 走 -1 故障值
 static void test_hw_unavailable_no_random() {
     InfraRedSensor ir(true);  // 构造为模拟
@@ -652,6 +685,7 @@ int main() {
     test_front_blind_with_bottom_valid_is_conservative();
     test_bottom_invalid_sets_valid_false();
     test_is_fall_risk_fail_closed();           // ALG-1
+    test_is_fall_risk_uses_injected_bottom();  // 方案A: 注入优先口径
     test_hw_unavailable_no_random();           // ALG-4
     test_determine_environment_depth_proxy_default();  // ALG-3
 

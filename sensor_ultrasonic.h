@@ -85,6 +85,7 @@ public:
 
     // ALG-1 (v2.2): 底部跌落风险独立判定 (fail-closed, 沿用 F4 get_cliff_detected 语义)。
     // 由独立 bottom_loop @20Hz 线程刷新, 不再依赖 read_all 同周期; 无数据/无效读数均判有风险。
+    // 方案A: 外部注入数据新鲜时**优先用注入的 bottom** (与 read_all 同口径: 注入优先, 过期回退内部)。
     bool is_fall_risk() const;
 
     // ALG-1 (v2.2): 取底部最新读数 (供 build_bottom_obstacle 等消费方; 未就绪返回 valid=false)
