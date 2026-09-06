@@ -217,6 +217,11 @@ UltrasonicReading UltrasonicArrayDriver::get_bottom_reading() const {
     return bottom_latest_;
 }
 
+// R4 (REVIEW): 底部线程是否已产出首帧 (启动预热用; 见 sensor_ultrasonic.h)
+bool UltrasonicArrayDriver::is_bottom_ready() const {
+    return bottom_have_.load();
+}
+
 void UltrasonicArrayDriver::stop_bottom() {
     bottom_running_ = false;
     if (bottom_thread_.joinable()) bottom_thread_.join();

@@ -90,6 +90,11 @@ public:
     // ALG-1 (v2.2): 取底部最新读数 (供 build_bottom_obstacle 等消费方; 未就绪返回 valid=false)
     UltrasonicReading get_bottom_reading() const;
 
+    // R4 (REVIEW): 底部线程是否已产出首帧。安全层启动预热用: 等 bottom 就绪再首轮 fuse(),
+    // 避免启动时 is_fall_risk() 因 !bottom_have_ 立即判悬崖 -> 首帧必 STOP (见 docs/REVIEW_FIXPLAN.md R4)。
+    // 不改 fail-closed 语义, 只是把首帧融合前置到传感器数据到位之后。
+    bool is_bottom_ready() const;
+
     /** 分时轮询读取前向 3 颗传感器 (串行, 间隔 30ms 防串扰, 一轮 ~60ms / 16Hz);
      *  底部已移至独立 20Hz 线程 (is_fall_risk), data.bottom 由 get_bottom_reading 缓存填充 */
     UltrasonicArrayData read_all();
