@@ -205,15 +205,15 @@ int OccupancyGridMap::occ_state(int col, int row) const {
 
 bool OccupancyGridMap::world_to_index(double wx, double wy,
                                       int& col, int& row) const {
-    col = world_to_col_row_(wx);
-    row = world_to_col_row_(wy);
+    col = world_to_col_(wx);
+    row = world_to_row_(wy);
     return col >= 0 && col < width_ && row >= 0 && row < height_;
 }
 
 void OccupancyGridMap::index_to_world(int col, int row,
                                       double& wx, double& wy) const {
-    wx = col_row_to_world_(col);
-    wy = col_row_to_world_(row);
+    wx = col_to_world_(col);
+    wy = row_to_world_(row);
 }
 
 int OccupancyGridMap::count_cells(int state) const {
@@ -227,11 +227,11 @@ int OccupancyGridMap::count_cells(int state) const {
 std::string OccupancyGridMap::stats() const {
     char buf[200];
     std::snprintf(buf, sizeof(buf),
-        "map %dx%d res=%.2fm  unknown=%d free=%d occ=%d neg=%ld dropped=%ld",
-        width_, height_, resolution_m_,
-        count_cells(-1), count_cells(0), count_cells(100),
-        std::count(negative_.begin(), negative_.end(), 1),
-        dropped_points_);
+                  "map %dx%d res=%.2fm  unknown=%d free=%d occ=%d neg=%lld dropped=%lld",
+                  width_, height_, resolution_m_,
+                  count_cells(-1), count_cells(0), count_cells(100),
+                  static_cast<long long>(std::count(negative_.begin(), negative_.end(), 1)),
+                  static_cast<long long>(dropped_points_));
     return std::string(buf);
 }
 

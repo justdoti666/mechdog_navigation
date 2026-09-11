@@ -9,6 +9,11 @@
 #include "mapping.h"
 
 #include <cmath>
+// MSVC 不带 _USE_MATH_DEFINES 时 <cmath> 不定义 M_PI (GCC/glibc 默认定义) ——
+// 补一个可移植定义, 否则 Windows 侧 test_mapping 编译失败 (C2065)。改动本身与逻辑无关。
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -67,6 +72,44 @@ int main() {
         // 全未知
         CHECK(m.count_cells(-1) == 200 * 200);
         CHECK(m.count_cells(100) == 0);
+    }
+
+    // ============ 1b. 非方形地图原点居中 (FIX-02 回归) ============
+    // 旧实现 world_to_col_row_ 对 col/row 都用 width_/2 偏移 →
+    // width_m != height_m 时行号整体错 (width_-height_)/2 格。
+    {
+        OccupancyGridMap m2(MapConfig{}, 0.25, CameraExtrinsics{}.x,
+                            /*width_m=*/4.0, /*height_m=*/8.0, /*resolution_m=*/0.25);
+        CHECK(m2.width() == 16);    // 4.0 / 0.25
+        CHECK(m2.height() == 32);   // 8.0 / 0.25
+
+        int col, row;
+        // 世界原点必须落在栅格中心: (width_/2, height_/2) —— 不是 (width_/2, width_/2)
+        CHECK(m2.world_to_index(0.0, 0.0, col, row));
+        CHECK(col == 8);            // width_/2
+        CHECK(row == 16);           // height_/2  ← 旧实现给 8 (错)
+
+        // 地图左下角格 (0,0) ↔ 世界 (-2, -4)
+        CHECK(m2.world_to_index(-2.0, -4.0, col, row));
+        CHECK(col == 0 && row == 0);
+
+        // 逆变换自洽
+        double wx, wy;
+        m2.index_to_world(8, 16, wx, wy);
+        CHECK_NEAR(wx, 0.0, 1e-9);
+        CHECK_NEAR(wy, 0.0, 1e-9);
+        m2.index_to_world(0, 0, wx, wy);
+        CHECK_NEAR(wx, -2.0, 1e-9);
+        CHECK_NEAR(wy, -4.0, 1e-9);
+        // 往返一致
+        CHECK(m2.world_to_index(wx, wy, col, row));
+        CHECK(col == 0 && row == 0);
+
+        // 方形地图行为不得变化 (回归保护)
+        OccupancyGridMap m3(MapConfig{}, 0.25, CameraExtrinsics{}.x, 4.0, 4.0, 0.25);
+        CHECK(m3.width() == 16 && m3.height() == 16);
+        CHECK(m3.world_to_index(0.0, 0.0, col, row));
+        CHECK(col == 8 && row == 8);
     }
 
     // ============ 2. 空点云安全 ============

@@ -149,12 +149,21 @@ private:
     static constexpr int L_OCC_TH = 4;   // 判占据阈值
     static constexpr int L_FREE_TH = -4; // 判空闲阈值
 
-    int world_to_col_row_(double v) const {  // 米→格, 原点居中
-        return static_cast<int>(std::lround(v / resolution_m_))
-               + width_ / 2;
+    // FIX-02: 列/行各自用 width_/2 与 height_/2 居中 —— 旧实现
+    // world_to_col_row_/col_row_to_world_ 对两个轴都用 width_/2,
+    // width_m != height_m 时行号整体偏 (width_-height_)/2 格
+    // (默认 10x10m 方形地图恰好掩盖了该缺陷)。
+    int world_to_col_(double wx) const {   // 米 → 列
+        return static_cast<int>(std::lround(wx / resolution_m_)) + width_ / 2;
     }
-    double col_row_to_world_(int i) const {
-        return (i - width_ / 2) * resolution_m_;
+    int world_to_row_(double wy) const {   // 米 → 行
+        return static_cast<int>(std::lround(wy / resolution_m_)) + height_ / 2;
+    }
+    double col_to_world_(int col) const {  // 列 → 米
+        return (col - width_ / 2) * resolution_m_;
+    }
+    double row_to_world_(int row) const {  // 行 → 米
+        return (row - height_ / 2) * resolution_m_;
     }
     int clamp_l_(int v) const {
         return v < LMIN ? LMIN : (v > LMAX ? LMAX : v);
