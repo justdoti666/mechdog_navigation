@@ -669,6 +669,55 @@ static void test_determine_environment_depth_proxy_default() {
           e == EnvironmentType::OUTDOOR);
 }
 
+// ============================================================
+// FIX-01 回归: 深度帧"可按 (w,h) 索引 depth_map"的守卫谓词
+//
+// 失效帧 (capture_real 取帧失败 / 模拟前) 的 depth_map 为空, 但
+// depth_width/height 仍是默认 640x480 (sensor_astra.h) —— 直接按
+// y*hw+x 索引即为空 vector 越界读 (UB)。热力图分支 (main.cpp D 键)
+// 曾缺这道守卫; 谓词抽到 sensor_astra.h 供主循环与单测共用同一口径。
+// ============================================================
+static void test_depth_frame_usable_guard() {
+    // 1) 三态失效帧: valid=false + 空 depth_map + 默认 640x480 → 不可用
+    AstraFrame dead;
+    dead.valid = false;
+    CHECK(dead.depth_width == 640 && dead.depth_height == 480);  // 默认值本身就是坑
+    CHECK(dead.depth_map.empty());
+    CHECK(!depth_frame_usable(dead));
+
+    // 2) 正常帧: 640x480 全尺寸 → 可用
+    AstraFrame good;
+    good.valid = true;
+    good.depth_map.assign(static_cast<size_t>(good.depth_width) * good.depth_height, 1500);
+    CHECK(depth_frame_usable(good));
+
+    // 3) valid=true 但图空 (取帧成功但未填充) → 不可用
+    AstraFrame empty_ok;
+    empty_ok.valid = true;
+    CHECK(!depth_frame_usable(empty_ok));
+
+    // 4) 尺寸不足以覆盖 w*h (部分填充) → 不可用
+    AstraFrame short_map;
+    short_map.valid = true;
+    short_map.depth_map.assign(1024, 1500);
+    CHECK(!depth_frame_usable(short_map));
+
+    // 5) 真机 320x240 帧 (SDK 默认未设 mode) → 可用
+    AstraFrame real320;
+    real320.valid = true;
+    real320.depth_width = 320;
+    real320.depth_height = 240;
+    real320.depth_map.assign(320u * 240u, 1500);
+    CHECK(depth_frame_usable(real320));
+
+    // 6) 非法宽高 (0/负) → 不可用
+    AstraFrame bad_dim;
+    bad_dim.valid = true;
+    bad_dim.depth_width = 0;
+    bad_dim.depth_map.assign(640u * 480u, 1500);
+    CHECK(!depth_frame_usable(bad_dim));
+}
+
 int main() {
     test_cliff_valid_check();
     test_min_forward_valid_filter();
@@ -688,6 +737,7 @@ int main() {
     test_is_fall_risk_uses_injected_bottom();  // 方案A: 注入优先口径
     test_hw_unavailable_no_random();           // ALG-4
     test_determine_environment_depth_proxy_default();  // ALG-3
+    test_depth_frame_usable_guard();           // FIX-01
 
     std::cout << "passed=" << g_passed << " failed=" << g_failed << std::endl;
     return g_failed == 0 ? 0 : 1;

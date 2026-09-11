@@ -4,11 +4,13 @@
  * 通过 Astra SDK (astra:: API) 获取深度图 (真机模式) / 模拟生成 (模拟模式)
  *
  * 真机模式 (USE_ASTRA_SDK):
- *   使用官方 FrameListener 回调模式 (与 SDK 示例 DepthReaderEventCPP 一致):
+ *   DepthReaderPoll 自 pump 轮询 (单执行者, 无独立线程):
  *   - 首次调用 capture_real 时初始化 StreamSet/Reader + 启动 Depth/Color 双流
- *   - 独立 update 线程持续 astra_update() 驱动帧回调
- *   - 回调内填充 RealAstraContext::color (彩色 RGB + 距离叠加)
- *   - 该模式经真机验证: depth+color 双流 640x480 正常出帧
+ *   - capture_real 在 reader_mutex 内循环 astra_update() + open_frame, 最长 80ms 窗口
+ *     (帧周期名义 33ms, 真机取帧 ~50ms → 窗口需覆盖一帧)
+ *   - 真机实测: depth+color 双流正常出帧 (SDK 未设 mode → 深度默认 320x240; 模拟帧 640x480)
+ *   - 注: FrameListener 回调模式下 Astra Pro 深度值恒 0 (SDK 已知行为), 已弃用;
+ *     也不设独立 update 线程 (D1 真机证伪"删线程自 pump 10ms 窗口", 见 capture_real 注释)
  */
 #pragma once
 
@@ -62,6 +64,20 @@ struct AstraFrame {
     int depth_width  = 640;
     int depth_height = 480;
 };
+
+// ------------------------------------------------------------
+// FIX-01: 深度帧是否可用于按 (depth_width, depth_height) 索引 depth_map。
+// 三态失效帧 (capture_real 取帧失败) 的 depth_map 为空, 但 depth_width/
+// depth_height 仍是默认 640x480 —— 主循环热力图分支 (D 键) 曾直接按
+// y*hw+x 索引 → 空 vector 越界读 (UB)。守卫口径集中在此一处, 避免
+// 主循环各分支 (点云/热力图) 各写一份而漏改。
+// ------------------------------------------------------------
+inline bool depth_frame_usable(const AstraFrame& frame) {
+    if (!frame.valid || frame.depth_width <= 0 || frame.depth_height <= 0) return false;
+    if (frame.depth_map.empty()) return false;
+    return frame.depth_map.size() >=
+           static_cast<size_t>(frame.depth_width) * static_cast<size_t>(frame.depth_height);
+}
 
 /** 彩色帧数据 (RGB888, 用于可视化显示) */
 struct ColorFrameData {

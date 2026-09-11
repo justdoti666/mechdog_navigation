@@ -56,6 +56,11 @@ static Gdiplus::GdiplusStartupInput g_gdiplus_startup;
 static ULONG_PTR g_gdiplus_token = 0;
 static volatile std::sig_atomic_t g_window_open = 1;
 static HWND g_hwnd = nullptr;
+// FIX-03: 窗口线程句柄 + 线程 id —— 主循环退出时必须先掐断窗口线程对栈对象 astra 的
+// 引用 (g_astra_ptr) 并等它真正退出, 才能 astra.stop()/析构。旧实现 CreateThread 丢弃
+// 句柄且从不 join → 窗口线程可能在 astra 析构后继续解引用 (真实 UAF)。
+static HANDLE g_viz_thread = nullptr;
+static DWORD  g_viz_tid = 0;
 
 // 共享最新融合结果 (由主循环写入, 由窗口线程读取)
 static FusionResult g_latest_result;
@@ -133,7 +138,7 @@ static bool g_heat_valid = false;
 static std::mutex g_viz_mutex;
 
 // 窗口线程独立刷新用: 指向 astra 驱动 (真机模式下窗口线程直接读彩色帧, 画面不依赖主循环频率)
-static AstraProDriver* g_astra_ptr = nullptr;
+static std::atomic<AstraProDriver*> g_astra_ptr{nullptr};   // FIX-03: 原子 —— 窗口线程读 / 主循环退出时置空并发
 
 // 方向 -> 俯视图角度 (度, 0=正前, 顺时针为正; 右=+90, 左=-90)
 static std::map<std::string, double> g_dir_angle = {
@@ -917,8 +922,11 @@ static DWORD WINAPI window_thread(LPVOID) {
         DispatchMessage(&msg);
         if (msg.message == WM_TIMER) {
             // 窗口线程独立刷新彩色帧 (画面流畅, 不依赖主循环 4-5Hz)
-            if (g_astra_ptr && g_astra_ptr->is_real()) {
-                auto cf = g_astra_ptr->get_color_frame();
+            // FIX-03: 一次性取指针快照 —— 旧写法 `g_astra_ptr && g_astra_ptr->...`
+            // 在两次求值之间主线程可能置空 (退出路径), 且非原子裸指针本身即数据竞争。
+            AstraProDriver* astra_p = g_astra_ptr.load();
+            if (astra_p && astra_p->is_real()) {
+                auto cf = astra_p->get_color_frame();
                 std::lock_guard<std::mutex> lock(g_viz_mutex);
                 g_color_frame = cf;
                 g_have_color = cf.valid;
@@ -1046,7 +1054,7 @@ int main(int argc, char** argv) {
         astra.init_hardware();
     }
     // 窗口线程独立刷新彩色帧用
-    g_astra_ptr = &astra;
+    g_astra_ptr.store(&astra);
     // 点云可视化模式: 提前设全局标志 (窗口线程 draw_scene 据此优先渲染点云)
     g_view_cloud = show_cloud;
     // 建图可视化模式: 同步全局状态 (--map; 窗口线程据此渲染占据图+轨迹)
@@ -1065,7 +1073,8 @@ int main(int argc, char** argv) {
     }
     // 启动可视化窗口线程 (--noviz 可禁用, 用于定位崩溃)
     if (!no_viz) {
-        CreateThread(nullptr, 0, window_thread, nullptr, 0, nullptr);
+        // FIX-03: 保存句柄 + 线程 id (退出时 PostMessage 需要 HWND/tid, 并需 WaitForSingleObject)
+        g_viz_thread = CreateThread(nullptr, 0, window_thread, nullptr, 0, &g_viz_tid);
     }
 #endif
 
@@ -1149,8 +1158,9 @@ int main(int argc, char** argv) {
                 g_cloud_valid_px.store(count_valid_pixels(frame.depth_map));
                 g_cloud_state.store(g_cloud_valid_px.load() == 0 ? 1 : 2);
             }
-            if (frame.valid && !frame.depth_map.empty()
-                && frame.depth_width > 0 && frame.depth_height > 0) {
+            // FIX-01: 统一守卫 (含 depth_map.size() >= w*h) —— 失效帧的 depth_map 为空
+            // 但 depth_width/height 仍是默认 640x480, 直取 w*h 个元素 = 空 vector 越界读
+            if (depth_frame_usable(frame)) {
                 // 诊断: M 键切换的深度图水平镜像 (只影响本可视化的点云, 不影响融合)
                 if (g_flip_depth.load()) {
                     const int fw = frame.depth_width, fh = frame.depth_height;
@@ -1283,7 +1293,9 @@ int main(int argc, char** argv) {
             // D 诊断: 深度热力图混合 RGB —— 深度像素按距离着色(近红远蓝)后
             // 半透明叠回彩色图。若热力红点落在实际近处物体上 → 深度与 RGB 对齐;
             // 若红点出现在远处物体上 → 深度图相对 RGB 左右镜像, 需驱动层翻转。
-            if (g_heat_overlay.load()) {
+            // FIX-01: 热力图分支必须与点云分支同口径守卫 —— 旧实现只有 g_heat_overlay,
+            // 真机取帧失败 (sensor_astra.cpp:216) 后按 D 会以空 depth_map 索引 hw*hh 次 (UB)
+            if (g_heat_overlay.load() && depth_frame_usable(frame)) {
                 ColorFrameData cf = astra.get_color_frame();
                 const int hw = frame.depth_width, hh = frame.depth_height;
                 std::vector<uint8_t> bgr((size_t)hw * hh * 3, 0);
@@ -1377,6 +1389,20 @@ int main(int argc, char** argv) {
         }
         std::cout << std::endl;
     }
+
+#ifdef _WIN32
+    // FIX-03 (UAF 修复): 退出顺序 = 断引用 → 通知窗口线程退出 → 等它真退出 → 才停/析构 astra。
+    // 旧实现创建线程后从不 join: 主循环因 Ctrl+C(g_stop) 退出时窗口线程仍活着, 其 WM_TIMER
+    // 处理会解引用即将析构的栈对象 astra (g_astra_ptr) —— 真实 UAF (低概率但非理论)。
+    g_astra_ptr.store(nullptr);                    // 自此窗口线程不再触碰 astra
+    if (g_viz_thread) {
+        if (g_hwnd) PostMessageW(g_hwnd, WM_CLOSE, 0, 0);   // 唤醒 GetMessage → WM_CLOSE→WM_DESTROY→PostQuitMessage
+        else if (g_viz_tid) PostThreadMessageW(g_viz_tid, WM_QUIT, 0, 0);
+        WaitForSingleObject(g_viz_thread, 2000);            // 有界等待 (2s), 不无限阻塞退出
+        CloseHandle(g_viz_thread);
+        g_viz_thread = nullptr;
+    }
+#endif
 
     astra.stop();
     std::cout << "已退出" << std::endl;
