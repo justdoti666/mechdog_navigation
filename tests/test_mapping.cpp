@@ -112,6 +112,38 @@ int main() {
         CHECK(col == 8 && row == 8);
     }
 
+    // ============ 9e. 地面过滤重载等价性 (FIX-05) ============
+    // 主循环每帧已为 2.5D/负障碍可视化跑过一次 segment_ground (main.cpp:1198) ——
+    // 复用重载必须与"内部自算 seg"的两参版产出同一张图, 否则复用就是改语义。
+    {
+        OccupancyGridMap m_a, m_b;
+        Pose2D pose;
+        PointCloud scene; scene.frame_id = "base_link";
+        for (double x = 1.0; x <= 3.0; x += 0.1)
+            for (double y = -1.0; y <= 1.0; y += 0.1) {
+                Point3D p; p.x = x; p.y = y; p.z = -0.18;
+                scene.points.push_back(p);
+            }
+        for (double h = 0.3; h <= 1.5; h += 0.1)
+            for (double y = -0.8; y <= 0.8; y += 0.1) {
+                Point3D p; p.x = 2.0; p.y = y; p.z = -0.18 + h;
+                scene.points.push_back(p);
+            }
+
+        m_a.insert_cloud_filtered(scene, pose);      // 两参版: 内部自算 seg
+
+        GroundSegParams gp{};
+        GroundSegResult seg;
+        segment_ground(scene, gp, seg);              // 调用方预算 (主循环口径)
+        m_b.insert_cloud_filtered(scene, seg, pose); // 复用重载
+
+        CHECK(m_a.count_cells(100) > 0);                              // 墙还在
+        CHECK(m_a.count_cells(100) == m_b.count_cells(100));          // 占据格数相同
+        CHECK(m_a.count_cells(-1) == m_b.count_cells(-1));            // 未知格数相同
+        CHECK(m_a.count_cells(0) == m_b.count_cells(0));              // 空闲格数相同
+        CHECK(m_a.stats() == m_b.stats());                            // 含负障碍/dropped 计数
+    }
+
     // ============ 2. 空点云安全 ============
     {
         OccupancyGridMap m;

@@ -131,6 +131,15 @@ void OccupancyGridMap::insert_cloud_filtered(const PointCloud& cloud_base,
     GroundSegResult seg;
     segment_ground(cloud_base, gp, seg);
 
+    // FIX-05: 实现收敛到下面的三参重载 (单一真相源), 避免两处各写一份
+    insert_cloud_filtered(cloud_base, seg, robot_pose);
+}
+
+void OccupancyGridMap::insert_cloud_filtered(const PointCloud& cloud_base,
+                                             const GroundSegResult& seg,
+                                             const Pose2D& robot_pose) {
+    if (cloud_base.points.empty()) return;
+
     // 障碍点 → 普通占据管线
     PointCloud obstacles;
     obstacles.frame_id = cloud_base.frame_id;

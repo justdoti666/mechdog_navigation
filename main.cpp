@@ -1252,7 +1252,10 @@ int main(int argc, char** argv) {
                                        frame_idx >= g_map_max_frames);
                     if (!over) {
                         // 建图增量更新 (不影响融合/避障; 静止时拼单视角, sweep 时拼圆周)
-                        g_mapper.insert_cloud(cloud_base, g_current_pose);
+                        // FIX-05: 改走地面过滤版 —— 地面点丢弃 (消除贴地假墙),
+                        // 负障碍进独立层; 并复用本帧已算好的 seg (上方 segment_ground),
+                        // 不重复跑 RANSAC
+                        g_mapper.insert_cloud_filtered(cloud_base, seg, g_current_pose);
                         g_trace.push_back(g_current_pose);
                     } else if (!g_map_saved.load()) {
                         g_map_saved.store(true);

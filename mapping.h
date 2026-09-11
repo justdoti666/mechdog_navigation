@@ -89,6 +89,17 @@ public:
                                const Pose2D& robot_pose);
 
     // --------------------------------------------------------
+    // FIX-05: 复用调用方已有地面分割结果的重载 —— 主循环每帧已为
+    // 2.5D 建图/负障碍可视化跑过一次 segment_ground (main.cpp:1198),
+    // 再走上面那个两参版会把 RANSAC 白跑第二遍 (单帧实测 ~1.2ms)。
+    // 语义与两参版完全一致 (同一份 seg + 同一份点云 → 同一张图,
+    // 由 tests/test_mapping.cpp §9e 的等价性用例锁定)。
+    // --------------------------------------------------------
+    void insert_cloud_filtered(const PointCloud& cloud_base,
+                               const GroundSegResult& seg,
+                               const Pose2D& robot_pose);
+
+    // --------------------------------------------------------
     // 障碍膨胀 (供规划器消费前的后处理): 对每个占据格,
     // 以 inflation_radius_m 为半径标记周围格为不可通行。
     // 本实现采用“占据格直接置 INSCRIBED, 邻域按距离衰减”的
