@@ -121,7 +121,7 @@ void transform_to_base(const PointCloud& in, const CameraExtrinsics& E,
 | 占据更新 | log-odds（±6，钳位 ±20，阈值 ±4） | 多帧投票，单帧噪声不会翻转状态 |
 | 空闲标记 | 相机原点→命中点光线步进（步长 2.5cm，限 5m） | 走廊打通 + **动态清障**（障碍移走后光线穿过即清除） |
 | 障碍膨胀 | 圆形核（默认 0.15m，`MapConfig::inflation_radius_m`） | 供规划器消费的 costmap 语义 |
-| 地图导出 | PGM (P2, ROS map_server 惯例: 0=占据/254=空闲/205=未知) | `nav2 map_server` 可直接加载 |
+| 地图导出 | PGM（**P2** = 调试/人眼可读格式；**P5 二进制 + 配对 yaml** 由 `save_nav2_map` 产出。值语义 0=占据/254=空闲/205=未知） | `nav2 map_server` 请加载 **`save_nav2_map`（P5）** 的产物；P2 为调试格式 |
 
 ### 核心接口
 
@@ -323,7 +323,7 @@ cmake --build .
 
 ## 已知限制
 
-1. **Astra SDK 真机深度已实现** — 经 `USE_ASTRA_SDK` 编译后 `capture_frame()` 走 FrameListener 真机分支（深度+彩色双流）；未编译时回退模拟模式
+1. **Astra SDK 真机深度已实现** — 经 `USE_ASTRA_SDK` 编译后 `capture_frame()` 走 **DepthReaderPoll 自 pump 轮询**真机分支（深度+彩色双流；`capture_real` 在 `reader_mutex` 内持续 `astra_update()`，无独立线程）；未编译时回退模拟模式。<br>注：**FrameListener 回调模式下 Astra Pro 深度值恒 0**（SDK 已知行为），该模式已弃用
 2. **环境红外阈值待标定** — `IrConfig` 为软件预设默认值，需硬件组按 `docs/IR_CALIBRATION.md` 实测后更新
 3. **wiringPi 真机 GPIO 未验证** — `measure_distance()` 的轮询实现受 Linux 调度抖动影响（1ms ≈ 17cm），后续可改边沿中断+时间戳
 4. **点云外参未标定（2.5D 依赖）** — P0 用 FOV 反推内参 + 外参占位初值（`x=0.12, y=0, z=0.18, pitch=+15°`）；狗未装机时按 §18.4 用零外参临时摆放联调，装机后需按 `docs/POINT_CLOUD_DESIGN.md` §12 量测 + 标定；**P1.5 的 2.5D 地形对外参尤其敏感**，外参不准时点云坐标系偏移（实测 y 偏到 -7.8m），2.5D 全 unknown。已提供 `--pitch/--height` 命令行实机调参，相机装机后需实测标定。
