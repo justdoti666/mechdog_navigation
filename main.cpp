@@ -1192,8 +1192,21 @@ int main(int argc, char** argv) {
                 }
 
                 // P1 负障碍: 降采样云 → base_link → 地面分割 (--free 手持放宽先验)
+                // FIX-10 (真 bug): transform_to_base 的输入必须是 camera_optical 系
+                // (其内部先做一次 optical→link, 见 point_cloud.cpp:112-114 与
+                // point_cloud.h:111 的契约注释)。此前抽稀的是**已经是 link 系**的
+                // cloud_ds → 二次旋转 90°, 前方 2.5-5m 的点落到 y≈-5~-2.5m:
+                // 建图格栅/地面分割(先验 z=-0.18)/2.5D 全部工作在错帧。
+                PointCloud cloud_opt_ds;
+                cloud_opt_ds.seq = frame.frame_seq;
+                cloud_opt_ds.stamp = frame.timestamp;
+                cloud_opt_ds.frame_id = cloud_opt.frame_id;   // "camera_optical"
+                cloud_opt_ds.points.reserve(cloud_opt.points.size() / step + 1);
+                for (size_t i = 0; i < cloud_opt.points.size(); i += step) {
+                    cloud_opt_ds.points.push_back(cloud_opt.points[i]);
+                }
                 PointCloud cloud_base;
-                transform_to_base(cloud_ds, cloud_E, cloud_base);
+                transform_to_base(cloud_opt_ds, cloud_E, cloud_base);
                 GroundSegResult seg;
                 segment_ground(cloud_base, gseg_params, seg);
 

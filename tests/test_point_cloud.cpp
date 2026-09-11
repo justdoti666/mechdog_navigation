@@ -502,6 +502,44 @@ static void test_screen_decimate() {
     }
 }
 
+// ============================================================
+// FIX-10 回归: transform_to_base 的输入必须是 camera_optical 系
+// (函数内部先做 optical→link, 见 point_cloud.h 契约注释)。
+// 误传 camera_link 系的云 = 二次旋转 90°, 前方距离跑到 Y 轴负向 ——
+// main.cpp 曾犯此错, 导致建图格栅/地面分割/2.5D 全部工作在错帧。
+// ============================================================
+static void test_transform_to_base_frame_contract() {
+    CameraExtrinsics E0;   // 外参归零, 只看旋转链
+    E0.x = 0.0; E0.y = 0.0; E0.z = 0.0; E0.roll = 0.0; E0.pitch = 0.0; E0.yaw = 0.0;
+
+    // 正确: 传 optical 系 (前方 2.5m / 左侧 1m) → base 得到 x=2.5(前), y=+1(左)
+    PointCloud opt; opt.frame_id = "camera_optical";
+    Point3D q; q.x = -1.0; q.y = 0.0; q.z = 2.5;
+    opt.points.push_back(q);
+    PointCloud out;
+    transform_to_base(opt, E0, out);
+    CHECK(std::fabs(out.points[0].x - 2.5) < 1e-9);
+    CHECK(std::fabs(out.points[0].y - 1.0) < 1e-9);
+    CHECK(std::fabs(out.points[0].z - 0.0) < 1e-9);
+
+    // 误用: 把 link 系 (X前=2.5, Y左=1) 当 optical 传 → 前方落到 Y 负向
+    PointCloud link; link.frame_id = "camera_link";
+    Point3D p; p.x = 2.5; p.y = 1.0; p.z = 0.0;
+    link.points.push_back(p);
+    transform_to_base(link, E0, out);
+    CHECK(std::fabs(out.points[0].x) < 1e-9);          // 不再落在 X
+    CHECK(std::fabs(out.points[0].y + 2.5) < 1e-9);    // 跑到 y=-2.5
+    CHECK(std::fabs(out.points[0].z + 1.0) < 1e-9);    // z 也被翻
+
+    // 两个函数的组合关系: link == optical→link 的结果
+    PointCloud viaFn;
+    transform_to_base(opt, E0, out);
+    transform_optical_to_link(opt, viaFn);
+    CHECK(std::fabs(out.points[0].x - viaFn.points[0].x) < 1e-9);
+    CHECK(std::fabs(out.points[0].y - viaFn.points[0].y) < 1e-9);
+    CHECK(std::fabs(out.points[0].z - viaFn.points[0].z) < 1e-9);
+}
+
 int main() {
     test_backprojection_plane();
     test_intrinsics_center_pixel();
@@ -518,6 +556,7 @@ int main() {
     test_count_valid_pixels();
     test_cloud_state_label();
     test_screen_decimate();
+    test_transform_to_base_frame_contract();   // FIX-10
 
     std::cout << "passed=" << g_passed << " failed=" << g_failed << std::endl;
     return g_failed == 0 ? 0 : 1;
