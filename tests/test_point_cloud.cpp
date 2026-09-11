@@ -311,6 +311,23 @@ static void test_null_depth_safe() {
 
     depth_to_cloud(depth.data(), -1, 480, K, cloud);
     CHECK(cloud.points.empty());
+
+    // FIX-06: 内参 fx/fy = 0 (或负) 必须运行期安全早退 ——
+    // 旧实现只有 assert, Release/NDEBUG 下被编译掉 → 除零产生 inf/nan 点。
+    CameraIntrinsics bad{};
+    bad.fx = 0.0;
+    depth_to_cloud(depth.data(), 640, 480, bad, cloud);
+    CHECK(cloud.points.empty());
+
+    bad = CameraIntrinsics{};
+    bad.fy = 0.0;
+    depth_to_cloud(depth.data(), 640, 480, bad, cloud);
+    CHECK(cloud.points.empty());
+
+    bad = CameraIntrinsics{};
+    bad.fx = -1.0;
+    depth_to_cloud(depth.data(), 640, 480, bad, cloud);
+    CHECK(cloud.points.empty());
 }
 
 // ============================================================

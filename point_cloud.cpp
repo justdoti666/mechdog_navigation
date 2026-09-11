@@ -34,8 +34,10 @@ void depth_to_cloud(const uint16_t* depth, int w, int h,
     // 空输入防御 (失效哨兵: 返回空点云, 不崩溃)
     if (!depth || w <= 0 || h <= 0) return;
 
-    // fx/fy 非零防御 (除零保护; 正常 CameraIntrinsics 默认值保证非零)
-    assert(K.fx > 0.0 && K.fy > 0.0 && "CameraIntrinsics fx/fy must be positive");
+    // FIX-06: 除零保护必须是运行期守卫 —— 旧实现只有 assert, NDEBUG/Release
+    // 下被编译掉, 内参异常 (fx/fy <= 0, 或 NaN) 会让 u/fx 产生 inf/NaN 点云。
+    // 提前返回空点云 (与上方空输入同口径)。用 !(x > 0) 同时挡住 NaN。
+    if (!(K.fx > 0.0) || !(K.fy > 0.0)) return;
 
     // 粗略预留 (假设 ~25% 有效像素, 避免反复 realloc)
     out.points.reserve(static_cast<size_t>(w) * h / 4);
