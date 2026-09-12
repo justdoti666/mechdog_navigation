@@ -10,11 +10,15 @@
  *   Traversable  = 能走 (与参考地面高度差在容忍内)
  *   ObstacleUp   = 凸起障碍 (高于地面超过可上台阶阈值, 上不去)
  *   CliffDown    = 沟/下行台阶 (低于地面超过可过沟阈值, 会跌落)
- *   TooSteep     = 坡度过陡 (相邻格高度差/坡度超阈值, 禁行)
+ *   TooSteep     = 地面整体过陡 (拟合平面倾角 > HeightMap25Config::slope_max, 默认 20°) → 已测到的可通行格一并标禁行 (保守)
  *   Unknown      = 该格没被扫到 (无样本)
  *
  * 复用 P1: 不做自己的 RANSAC, 直接吃 GroundSegResult.plane (单平面)。
  * v1 边界: 单平面假设 (与 P1 一致); 不处理多层平台 (将来升级 elevation_mapping)。
+ *   - TooSteep 是「整体拟合平面」级判断, **没有**逐格/相邻格坡度计算 (见 .cpp 同处注释);
+ *   - 上游 segment_ground 只接受倾角 ≤ GroundSegConfig::plane_max_tilt_deg (默认 15°) 的平面,
+ *     故本标签在生产路径下**不可达** (仅当外部构造的 seg 倾角 >20° 时才触发, 见 T6 单测);
+ *     两个阈值的联动关系、"放宽前必须同批改造"的约束, 见 config.h 同名字段注释。
  *
  * 零依赖: 仅标准库 + point_cloud.h / ground_segmentation.h 类型。
  */

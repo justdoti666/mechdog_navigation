@@ -181,6 +181,12 @@ struct GroundSegConfig {
     static constexpr double ground_prior_z     = -0.18; // 装机高度先验 (与 CameraExtrinsics::z 联动, 量测后两处同步)
     static constexpr double prior_window       = 0.10;  // 平面高度接受半带宽 (手持实验可放宽到 ~1.0)
     static constexpr double plane_max_tilt_deg = 15.0;  // 法向偏离竖直的容限 (更陡按障碍处理, 保守)
+    // ⚠ 与 HeightMap25Config::slope_max (默认 20°, 见 heightmap_2d5.h) 联动:
+    //   本容限(15°) < slope_max(20°) ⇒ 2.5D 的 TooSteep 分支在生产路径下不可达
+    //   (只接受 ≤15° 的平面 → acos(nz) ≤ 15° 永不 > 20°)。
+    //   若为支持爬坡把本参数放宽到 >20°, TooSteep 立刻可达, 而当前实现会把整图
+    //   *已测到的* 可通行格全部翻成禁行 (含脚下平地) —— 必须同批改造为
+    //   "只标有样本的格 + 单独输出坡度角", 并先补 TooSteep 单测。
     static constexpr double ransac_inlier_dist = 0.02;  // RANSAC 内点判定距离
     static constexpr int    ransac_max_iters   = 200;
     static constexpr double ransac_early_ratio = 0.55;  // 内点率达标提前退出

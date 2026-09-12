@@ -50,8 +50,6 @@ void build_heightmap_25(const PointCloud& cloud, const GroundSegResult& seg,
     out.flag.assign(static_cast<size_t>(out.cols) * out.rows, CellFlag::Unknown);
     out.valid = true;
 
-    const double cos_max_slope = std::cos(cfg.slope_max * 0.01745329251994329576);
-
     // 逐点: 算带符号平面距离 s (上正下负, 相对拟合地面), 记录每格最高/最低表面
     // 用 s 而非绝对 z: s 直接是"相对地面高度", 与 P1 语义一致, 对外参/倾斜更鲁棒.
     struct CellRaw {
@@ -117,9 +115,15 @@ void build_heightmap_25(const PointCloud& cloud, const GroundSegResult& seg,
         }
     }
 
-    // ---- 跨格坡度检查: 相邻列高度差过大 → 判 TooSteep ----
-    // 单平面假设下, 平面本身是斜面; 若坡度超过 slope_max → 整列区域判陡。
-    // 这里简化: 用平面法向与竖直的夹角判断整体坡度; 超过则按列传播。
+    // ---- 整体坡度检查: 拟合平面自身倾角过大 → 判 TooSteep ----
+    // 口径说明 (FIX-09 核实): 这是**整体平面**级判断, 不是逐格/相邻格坡度。
+    // 在"每格高度相对拟合平面(带符号距离 s)"的基准下, 逐格坡度与已有
+    // step_up_max_m(0.10)/drop_down_max_m(0.15) 重复, 故未实现(原注释曾误称
+    // "相邻列高度差过大", 已更正)。
+    // 可达性: 上游 segment_ground 的 plane_max_tilt_deg(默认 15°) 会先拒掉 >15°
+    // 的平面, 而本处阈值 slope_max 默认 20° ⇒ 生产路径下本分支不可达(死代码级),
+    // 只有外部构造的 seg 才能触发 —— 见 tests/test_heightmap_2d5.cpp 的 T6。
+    // 若将来放宽上游容限以支持爬坡, 必须同批改为"只标有样本的格 + 单独输出坡度角"。
     const double plane_tilt = std::acos(std::clamp(seg.plane.nz, -1.0, 1.0));
     if (plane_tilt > cfg.slope_max * 0.01745329251994329576) {
         // 地面本身过陡 → 所有 Traversable 改为 TooSteep (保守)
