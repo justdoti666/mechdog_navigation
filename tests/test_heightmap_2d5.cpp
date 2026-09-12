@@ -6,6 +6,8 @@
  *   T3 沟(25cm深): 沟处 CliffDown
  *   T4 无地面/只墙: fail-closed (plane invalid → hm25 不输出)
  *   T5 空/退化输入: 不崩溃
+ *   T6 整体坡度过陡 (FIX-09): 外部构造的 seg 倾角 >slope_max(20°) → 已测格全翻 TooSteep;
+ *      倾角 = 上游容限 15° → 不触发 (证明该分支在生产路径不可达)
  */
 #include "heightmap_2d5.h"
 #include "ground_segmentation.h"
@@ -106,9 +108,70 @@ static void test_degenerate() {
     CHECK(!hm.valid);  // 空平面无效 → 不输出
 }
 
+// ============================================================
+// T6 TooSteep 语义锁定 (FIX-09)
+// 生产路径不可达: segment_ground 的 plane_max_tilt_deg(默认 15°) 会先拒掉 >15° 的
+// 平面, 而本处阈值 slope_max 默认 20° → acos(nz) 永不 > 20°。故这里**直接构造 seg**
+// 调用 build_heightmap_25, 把现有语义钉住, 以免将来放宽上游容限时踩到"整图一刀切"。
+// 关键: 点云必须落在所给平面上 (带符号距离 s≈0), 否则会先被判 ObstacleUp/CliffDown。
+// ============================================================
+static const double kDeg2Rad = 3.14159265358979323846 / 180.0;
+
+// 造"点云贴合该倾角平面"的场景: 平面 nx*x + nz*z + d = 0, 原点处高度 = -0.18
+static void make_tilted_scene(PointCloud& c, GroundSegResult& seg, double tilt_deg) {
+    const double nx = std::sin(tilt_deg * kDeg2Rad);
+    const double nz = std::cos(tilt_deg * kDeg2Rad);
+    const double d  = 0.18 * nz;
+    seg = GroundSegResult{};
+    seg.plane.valid   = true;
+    seg.plane.nx      = nx;
+    seg.plane.ny      = 0.0;
+    seg.plane.nz      = nz;
+    seg.plane.d       = d;
+    seg.plane.inliers = 1000;
+    add_ground_patch(c, 0.5, 3.0, -1.5, 1.5, 0.05,
+                     [nx, nz, d](double x, double) { return -(nx * x + d) / nz; });
+}
+
+static void test_too_steep() {
+    // ① 倾角 25° (> slope_max 20°) → 已测到的可通行格全部翻成 TooSteep
+    {
+        PointCloud c; GroundSegResult seg; make_tilted_scene(c, seg, 25.0);
+        HeightMap25Result hm;
+        build_heightmap_25(c, seg, HeightMap25Config{}, hm);
+        CHECK(hm.valid);
+        CHECK(hm.count_steep > 0);          // 触发
+        CHECK(hm.count_traversable == 0);   // 一刀切: 全被翻走 (含脚下平地)
+        CHECK(hm.count_unknown > 0);        // 未扫到的格仍 Unknown (不是整图清空)
+        CHECK(hm.count_unknown + hm.count_traversable + hm.count_steep +
+              hm.count_up + hm.count_down == hm.cols * hm.rows);   // 计数自洽
+    }
+    // ② 倾角 15° (= 上游 plane_max_tilt_deg 上限) → 不触发: 证明生产路径不可达
+    {
+        PointCloud c; GroundSegResult seg; make_tilted_scene(c, seg, 15.0);
+        HeightMap25Result hm;
+        build_heightmap_25(c, seg, HeightMap25Config{}, hm);
+        CHECK(hm.valid);
+        CHECK(hm.count_steep == 0);
+        CHECK(hm.count_traversable > 0);    // 正常可通行
+    }
+    // ③ 阈值两侧: 19° 不翻 / 21° 翻 (比较为严格 >; 避开 20.0° 的浮点边界)
+    {
+        PointCloud c19; GroundSegResult s19; make_tilted_scene(c19, s19, 19.0);
+        HeightMap25Result h19;
+        build_heightmap_25(c19, s19, HeightMap25Config{}, h19);
+        CHECK(h19.count_steep == 0);
+        PointCloud c21; GroundSegResult s21; make_tilted_scene(c21, s21, 21.0);
+        HeightMap25Result h21;
+        build_heightmap_25(c21, s21, HeightMap25Config{}, h21);
+        CHECK(h21.count_steep > 0);
+    }
+}
+
 int main() {
     std::cout << "=== heightmap 2.5d tests ===" << std::endl;
     test_flat(); test_step_up(); test_cliff_down(); test_wall_only(); test_degenerate();
+    test_too_steep();
     std::cout << "=== " << g_checks << " checks, " << g_fail << " failed ===" << std::endl;
     return g_fail == 0 ? 0 : 1;
 }
