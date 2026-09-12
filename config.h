@@ -142,6 +142,28 @@ struct EmergencyConfig {
 };
 
 // ============================================================
+// 近场地形避障 (P1 地面分割 + P1.5 2.5D → 融合决策) —— "路1"
+// ============================================================
+// 背景: P1 的负障碍点 (GroundSegResult::negative_points) 与 P1.5 的 2.5D 禁行格
+// (CliffDown/ObstacleUp/TooSteep) 此前**只喂可视化** (main.cpp 的 g_neg_cloud /
+// g_hm25_snapshot), determine_action 完全看不到 → 前方有坑只能靠底部超声踩到边沿兜底
+// (事后), 不能提前停/让 (事前)。本组参数把"前方走廊内的地形禁行"接进决策:
+//   near 走廊 x∈[near_x_lo, near_x_hi] 命中 → STOP      (优先级仅低于悬崖/全失效)
+//   mid  走廊 x∈(near_x_hi, mid_x_hi] 命中 → 至少降速; 明显偏一侧则向对侧让开
+// 口径: 走廊半宽 = 机身半宽 + 余量; 只判正前方 (不做后向/侧向); 命中 = 该格/该点
+//       落在走廊内且标签为 CliffDown/ObstacleUp/TooSteep (或负障碍点)。
+// 与已有安全网的冗余: 深度盲区 0.6m 以内本模块无数据 → 由底部超声 (ALG-1) 兜底,
+//       故近界取 0.40m 保留一段重叠区 (双物理原理)。
+// 依赖: 需要点云分支开启 (--cloud / --map / --hm25); 未注入地形时行为与接入前一致。
+struct TerrainAvoidConfig {
+    static constexpr double near_x_lo_m       = 0.40; // 近场禁行走廊近界 (m)
+    static constexpr double near_x_hi_m       = 1.20; // 近场禁行走廊远界 (m)
+    static constexpr double mid_x_hi_m        = 2.00; // 中距观察区远界 (m)
+    static constexpr double corridor_y_half_m = 0.30; // 走廊半宽 (机身半宽 + 余量)
+    static constexpr double mid_side_deadband_m = 0.15; // 中距偏侧死区 (小于此值只降速不转向)
+};
+
+// ============================================================
 // 环境判定统一阈值 (ALG-3 v2.2: 深度代理与红外同源, 消除双轨)
 // ============================================================
 // TSL2591 已取消购买 (见 docs/FIX_PLAN.md F3 决策), 环境光强判定默认走

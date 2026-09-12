@@ -67,6 +67,10 @@ FusionResult SensorFusion::fuse() {
     double min_ultrasonic_cm = ultrasonic_data.get_min_forward_distance_cm();
     // M1: 传感器有效性 (fail-closed: 全失效时 determine_action 直接 STOP)
     result.sensors_valid = !all_sensors_invalid(astra_frame, ultrasonic_data);
+    // 路1: 近场地形状态透出到结果 (诊断/可观测; 决策在 determine_action 里用)
+    result.terrain_block_near = terrain_near_;
+    result.terrain_block_mid  = terrain_mid_;
+    result.terrain_block_x_m  = terrain_x_;
     result.recommended_action = determine_action(
         result.min_forward_distance_m, min_ultrasonic_cm, result.cliff_detected,
         result.obstacles, result.sensors_valid, front_valid);
@@ -341,6 +345,13 @@ NavigationAction SensorFusion::determine_action(
         return NavigationAction::STOP;
     }
 
+    // 路1: 近场地形 (P1/P1.5) —— 前方 0.4~1.2m 走廊内有坑/台阶: 立即停车。
+    // 优先级: 高于"前向失明降速"(下方) 与 超声/融合距离阶梯 —— 相机看不见不代表
+    // 前方没坑; 但**低于**悬崖检测与全失效 (上面两条)。
+    if (terrain_near_) {
+        return NavigationAction::STOP;
+    }
+
     // R3: 前向 (left/center/right) 全部失效时, min_forward=8.0 兜底不可作"开阔"依据 ——
     // 机器人前方完全失明 (镜头被挡 + 三颗前向超声全坏), 即使 bottom 有效也不得
     // FORWARD (此前判定把 bottom 计入有效性导致 fail-open)。降速保守行驶。
@@ -366,6 +377,17 @@ NavigationAction SensorFusion::determine_action(
     } else if (dist_cm <= EmergencyConfig::safe_dist_cm) {
         return choose_direction(obstacles);
     } else {
+        // 路1: 中距 (1.2~2.0m) 有坑/台阶 —— 至少降速; 明显偏一侧则向对侧让开。
+        // 只在"本来要 FORWARD"时生效 (不升级已有的 STOP/BACKWARD/转向)。
+        if (terrain_mid_) {
+            if (terrain_mid_side_ > TerrainAvoidConfig::mid_side_deadband_m) {
+                return NavigationAction::TURN_RIGHT;   // 地形障碍偏左 → 向右让
+            }
+            if (terrain_mid_side_ < -TerrainAvoidConfig::mid_side_deadband_m) {
+                return NavigationAction::TURN_LEFT;    // 地形障碍偏右 → 向左让
+            }
+            return NavigationAction::SLOW_FORWARD;
+        }
         return NavigationAction::FORWARD;
     }
 }
@@ -413,6 +435,42 @@ NavigationAction SensorFusion::choose_direction(
         return NavigationAction::TURN_RIGHT;
     }
     return NavigationAction::BACKWARD;
+}
+
+// ========== 路1: 近场地形避障 (P1/P1.5 → 决策) ==========
+// 见 config.h TerrainAvoidConfig 的说明。两个来源 OR:
+//   ① P1.5 2.5D 的禁行格 (CliffDown/ObstacleUp/TooSteep)
+//   ② P1 的负障碍点 (负障碍云; 2.5D 无平面/稀疏时仍可能抓到坑)
+// 未注入/命中为空 -> terrain_* 全 false, determine_action 行为与接入前逐位一致。
+void SensorFusion::set_local_terrain(const HeightMap25Result& hm,
+                                     const GroundSegResult& seg) {
+    const double near_lo = TerrainAvoidConfig::near_x_lo_m;
+    const double near_hi = TerrainAvoidConfig::near_x_hi_m;
+    const double mid_hi  = TerrainAvoidConfig::mid_x_hi_m;
+    const double yh      = TerrainAvoidConfig::corridor_y_half_m;
+
+    const CorridorScan near_scan = merge_corridor(
+        scan_corridor(hm, near_lo, near_hi, yh),
+        scan_corridor_points(seg.negative_points, near_lo, near_hi, yh));
+
+    const CorridorScan mid_scan = merge_corridor(
+        scan_corridor(hm, near_hi, mid_hi, yh),
+        scan_corridor_points(seg.negative_points, near_hi, mid_hi, yh));
+
+    terrain_near_      = near_scan.blocked;
+    terrain_mid_       = mid_scan.blocked;
+    terrain_mid_count_ = mid_scan.count;
+    terrain_mid_side_  = mid_scan.mean_y_m;
+    terrain_x_         = near_scan.blocked ? near_scan.nearest_x_m
+                                           : mid_scan.nearest_x_m;
+}
+
+void SensorFusion::clear_local_terrain() {
+    terrain_near_      = false;
+    terrain_mid_       = false;
+    terrain_x_         = 0.0;
+    terrain_mid_side_  = 0.0;
+    terrain_mid_count_ = 0;
 }
 
 // M1: 全部传感器均无有效数据?

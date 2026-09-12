@@ -107,4 +107,26 @@ void build_heightmap_25(const PointCloud& cloud_base,
                         const HeightMap25Config& cfg,
                         HeightMap25Result& out);
 
+// ============================================================
+// 走廊扫描 (近场地形避障用 —— 见 config.h TerrainAvoidConfig)
+// ============================================================
+/** 一次走廊扫描的聚合结果 */
+struct CorridorScan {
+    bool   blocked     = false; // 走廊内命中禁行地形
+    int    count       = 0;     // 命中格/点数
+    double nearest_x_m = 0.0;   // 最近命中处的 x (m; 无命中 = 0)
+    double mean_y_m    = 0.0;   // 命中处平均 y (>0 偏左, <0 偏右; 选让开方向用)
+};
+
+/** 扫描 2.5D 栅格的走廊 x∈[x_lo,x_hi], |y|<=y_half (命中 = CliffDown/ObstacleUp/TooSteep) */
+CorridorScan scan_corridor(const HeightMap25Result& hm,
+                           double x_lo, double x_hi, double y_half);
+
+/** 扫描点云/点集的走廊 (用于 P1 负障碍点: 2.5D 稀疏或无平面时仍能捕捉坑) */
+CorridorScan scan_corridor_points(const std::vector<Point3D>& points,
+                                  double x_lo, double x_hi, double y_half);
+
+/** 合并两次扫描 (blocked 取或, count 相加, nearest 取小, mean_y 按 count 加权) */
+CorridorScan merge_corridor(const CorridorScan& a, const CorridorScan& b);
+
 } // namespace mechdog

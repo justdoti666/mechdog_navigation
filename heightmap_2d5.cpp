@@ -137,4 +137,64 @@ void build_heightmap_25(const PointCloud& cloud, const GroundSegResult& seg,
     }
 }
 
+// ============================================================
+// 走廊扫描 (近场地形避障; 见 config.h TerrainAvoidConfig)
+// ============================================================
+CorridorScan scan_corridor(const HeightMap25Result& hm,
+                           double x_lo, double x_hi, double y_half) {
+    CorridorScan sc;
+    if (!hm.valid || hm.cols <= 0 || hm.rows <= 0) return sc;
+    if (x_hi < x_lo) std::swap(x_lo, x_hi);
+    double sum_y = 0.0;
+    for (int r = 0; r < hm.rows; ++r) {
+        for (int c = 0; c < hm.cols; ++c) {
+            const CellFlag f = hm.flag[static_cast<size_t>(r) * hm.cols + c];
+            if (f != CellFlag::CliffDown && f != CellFlag::ObstacleUp &&
+                f != CellFlag::TooSteep) continue;
+            double wx = 0.0, wy = 0.0;
+            hm.index_to_world(c, r, wx, wy);
+            if (wx < x_lo || wx > x_hi) continue;
+            if (std::fabs(wy) > y_half) continue;
+            if (!sc.blocked || wx < sc.nearest_x_m) sc.nearest_x_m = wx;
+            sc.blocked = true;
+            ++sc.count;
+            sum_y += wy;
+        }
+    }
+    if (sc.count > 0) sc.mean_y_m = sum_y / sc.count;
+    return sc;
+}
+
+CorridorScan scan_corridor_points(const std::vector<Point3D>& points,
+                                  double x_lo, double x_hi, double y_half) {
+    CorridorScan sc;
+    if (x_hi < x_lo) std::swap(x_lo, x_hi);
+    double sum_y = 0.0;
+    for (const auto& p : points) {
+        if (p.x < x_lo || p.x > x_hi) continue;
+        if (std::fabs(p.y) > y_half) continue;
+        if (!sc.blocked || p.x < sc.nearest_x_m) sc.nearest_x_m = p.x;
+        sc.blocked = true;
+        ++sc.count;
+        sum_y += p.y;
+    }
+    if (sc.count > 0) sc.mean_y_m = sum_y / sc.count;
+    return sc;
+}
+
+CorridorScan merge_corridor(const CorridorScan& a, const CorridorScan& b) {
+    CorridorScan m;
+    m.count   = a.count + b.count;
+    m.blocked = a.blocked || b.blocked;
+    if (a.blocked && b.blocked)      m.nearest_x_m = std::min(a.nearest_x_m, b.nearest_x_m);
+    else if (a.blocked)              m.nearest_x_m = a.nearest_x_m;
+    else if (b.blocked)              m.nearest_x_m = b.nearest_x_m;
+    if (m.count > 0) {
+        const double wa = static_cast<double>(a.count);
+        const double wb = static_cast<double>(b.count);
+        m.mean_y_m = (a.mean_y_m * wa + b.mean_y_m * wb) / (wa + wb);
+    }
+    return m;
+}
+
 } // namespace mechdog

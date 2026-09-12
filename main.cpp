@@ -1140,6 +1140,24 @@ int main(int argc, char** argv) {
 
         auto cmd = planner.plan(result);
 
+        // 路1: 近场地形状态变化时提示 (地形由上一轮点云块注入, 见 fusion.set_local_terrain)
+        {
+            static int terr_last = -1;
+            const int terr_cur = result.terrain_block_near ? 2
+                               : (result.terrain_block_mid ? 1 : 0);
+            if (terr_cur != terr_last) {
+                terr_last = terr_cur;
+                if (terr_cur > 0) {
+                    LOG_WARN("[terrain] 近场地形禁行: "
+                             << (terr_cur == 2 ? "近场 0.4~1.2m → STOP"
+                                               : "中距 1.2~2.0m → 降速/让开")
+                             << "  最近 x=" << result.terrain_block_x_m << "m");
+                } else {
+                    LOG_INFO("[terrain] 走廊内已无禁行地形");
+                }
+            }
+        }
+
 #ifdef _WIN32
         // 更新可视化共享数据 (彩色帧由窗口线程独立刷新, 这里只更新融合结果)
         {
@@ -1249,7 +1267,23 @@ int main(int argc, char** argv) {
                 GroundSegResult seg;
                 segment_ground(cloud_base, gseg_params, seg);
 
-                // ---- P1.5 2.5D 近场地形: 基于 P1 平面 + 点云建高程/可通行格 (--hm25) ----
+                // ---- P1.5 2.5D 近场地形 ----
+                // 现在**无条件**构建 (只要在点云分支里): 因为"路1"近场地形避障要靠它
+                // 做决策, 不能静默依赖可视化开关 --hm25 (后者只控制下面的快照/日志)。
+                HeightMap25Result hm;
+                HeightMap25Config hcfg;
+                build_heightmap_25(cloud_base, seg, hcfg, hm);
+
+                // ---- 路1: 近场地形 → 融合决策 ----
+                // P1 负障碍点 + P1.5 禁行格 (CliffDown/ObstacleUp/TooSteep) 注入融合,
+                // 由 determine_action 判: 近场走廊 (0.4~1.2m) 命中 → STOP;
+                // 中距 (1.2~2.0m) 命中 → 降速/向对侧让开。
+                // ⚠ 时序: fuse() 在循环开头, 点云块在其后 → 地形有 1 帧延迟
+                //   (8Hz 下约 125ms; 0.2m/s 时 ≈2.5cm 行程, 可接受; 后续可把感知提到
+                //    fuse() 之前彻底消除)。
+                fusion.set_local_terrain(hm, seg);
+
+                // ---- P1.5 可视化/诊断 (--hm25) ----
                 if (g_enable_hm25) {
                     // 诊断: 只打印一次 cloud_base 范围 + P1 平面
                     static bool hm25_diag_once = false;
@@ -1271,9 +1305,7 @@ int main(int argc, char** argv) {
                                      << " plane=" << seg.plane.valid);
                         }
                     }
-                    HeightMap25Result hm;
-                    HeightMap25Config hcfg;
-                    build_heightmap_25(cloud_base, seg, hcfg, hm);
+                    // hm/hcfg 已在上方无条件构建 (路1 决策需要), 这里只输出诊断与快照
                     if (hm.valid) LOG_INFO("[hm25] " << hm.stats());
                     else LOG_WARN("[hm25] invalid (no ground plane)");
                     std::lock_guard<std::mutex> lock2(g_viz_mutex);

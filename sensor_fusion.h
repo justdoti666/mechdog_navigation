@@ -10,6 +10,7 @@
 #include "sensor_ultrasonic.h"
 #include "sensor_astra.h"
 #include "sensor_ir.h"
+#include "heightmap_2d5.h"   // 路1: HeightMap25Result / CellFlag / scan_corridor (近场地形避障)
 #include <string>
 #include <unordered_map>
 
@@ -60,6 +61,11 @@ struct FusionResult {
     double effective_ultrasonic_weight          = 0.0;
     NavigationAction recommended_action        = NavigationAction::FORWARD;
     double min_forward_distance_m              = 8.0;
+    // 路1: 近场地形避障 (P1/P1.5 → 决策)。未注入地形时三者恒为 false/false/0 ——
+    // 与接入前逐位一致 (回归安全)。
+    bool   terrain_block_near = false;  // 前方 0.4~1.2m 走廊内有坑/台阶 (STOP 级)
+    bool   terrain_block_mid  = false;  // 前方 1.2~2.0m 有坑/台阶 (降速/让开级)
+    double terrain_block_x_m  = 0.0;    // 最近命中处的 x (m; 0 = 无命中)
 };
 
 /**
@@ -77,6 +83,17 @@ public:
     /** 执行一次传感器融合 */
     FusionResult fuse();
 
+    /**
+     * 路1: 注入近场地形 (P1 地面分割 + P1.5 2.5D, 需为同帧输出)。
+     * 每帧调用一次; 不调用 (或调用 clear_local_terrain) 时决策完全不受影响 (= 接入前行为)。
+     * @param hm  2.5D 结果 (hm.valid=false 时只看 seg.negative_points)
+     * @param seg 地面分割结果 (用其 negative_points 作为坑的第二来源)
+     */
+    void set_local_terrain(const HeightMap25Result& hm, const GroundSegResult& seg);
+
+    /** 路1: 清除近场地形 (退出点云分支/无地形数据时调用) */
+    void clear_local_terrain();
+
 private:
     // 单元测试访问 (tests/test_fusion.cpp 专用, R-3: 测试调用真函数而非复刻逻辑)
     friend class SensorFusionTestAccess;
@@ -84,6 +101,13 @@ private:
     AstraProDriver* astra_;
     UltrasonicArrayDriver* ultrasonic_;
     InfraRedSensor* ir_;
+
+    // 路1: 近场地形状态 (由 set_local_terrain 刷新, 供 determine_action 读取)
+    bool   terrain_near_      = false; // 近场走廊 (0.4~1.2m) 命中禁行地形
+    bool   terrain_mid_       = false; // 中距 (1.2~2.0m) 命中禁行地形
+    double terrain_x_         = 0.0;   // 最近命中处 x (诊断)
+    double terrain_mid_side_  = 0.0;   // 中距命中的平均 y (>0 偏左, <0 偏右)
+    int    terrain_mid_count_ = 0;     // 中距命中数
 
     static constexpr double kCmToM = 0.01;
 

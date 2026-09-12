@@ -82,7 +82,8 @@ endif()
 # 单元测试（F13）
 enable_testing()
 add_executable(test_fusion tests/test_fusion.cpp
-    sensor_ultrasonic.cpp sensor_astra.cpp sensor_ir.cpp sensor_fusion.cpp)
+    sensor_ultrasonic.cpp sensor_astra.cpp sensor_ir.cpp sensor_fusion.cpp
+    heightmap_2d5.cpp)   # 路1: 近场地形避障 (scan_corridor/merge_corridor) 由 sensor_fusion 调用
 target_include_directories(test_fusion PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_fusion PRIVATE Threads::Threads)
 if(USE_ASTRA_SDK)
