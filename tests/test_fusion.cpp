@@ -718,6 +718,149 @@ static void test_depth_frame_usable_guard() {
     CHECK(!depth_frame_usable(bad_dim));
 }
 
+// ============================================================
+// 路1: 近场地形避障 (P1/P1.5 → 决策)
+//   背景: P1 负障碍点 / P1.5 2.5D 禁行格此前**只喂可视化**
+//   (main.cpp 的 g_neg_cloud / g_hm25_snapshot), determine_action 看不到 →
+//   前方有坑只能靠底部超声踩到边沿兜底 (事后), 不能提前停/让 (事前)。
+//   锁定: 近场走廊命中 → STOP; 中距命中 → 至少降速 (明显偏侧则让开);
+//         走廊外/未注入 → 与接入前逐位一致 (回归)。
+// ============================================================
+
+// 造 2.5D 结果: 全 Unknown, 在指定位置放一个禁行格 (栅格覆盖 x∈[0,3.0], y∈±2.5)
+static HeightMap25Result make_hm25_cell(double wx, double wy, CellFlag f) {
+    HeightMap25Result hm;
+    hm.valid = true;
+    hm.cols = 61; hm.rows = 101;
+    hm.cell_size = 0.05; hm.min_x_m = 0.0; hm.y_half_m = 2.5;
+    const size_t n = static_cast<size_t>(hm.cols) * hm.rows;
+    hm.flag.assign(n, CellFlag::Unknown);
+    hm.height.assign(n, 0.0f);
+    int c = 0, r = 0;
+    if (hm.world_to_index(wx, wy, c, r)) hm.flag[static_cast<size_t>(r) * hm.cols + c] = f;
+    return hm;
+}
+
+// 造一条沿 y 的禁行带 (对称 → 平均 y≈0)
+static HeightMap25Result make_hm25_band(double wx, double y_lo, double y_hi, CellFlag f) {
+    HeightMap25Result hm = make_hm25_cell(wx, y_lo, f);
+    for (double y = y_lo; y <= y_hi + 1e-9; y += 0.05) {
+        int c = 0, r = 0;
+        if (hm.world_to_index(wx, y, c, r)) hm.flag[static_cast<size_t>(r) * hm.cols + c] = f;
+    }
+    return hm;
+}
+
+static void test_terrain_near_block_stops() {
+    AstraProDriver astra(true);
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    InfraRedSensor ir(true);
+    SensorFusion fusion(&astra, &ultrasonic, &ir);
+
+    const std::unordered_map<std::string, FusedObstacle> none;
+    GroundSegResult no_neg;
+
+    // 基线: 未注入地形, 前方 8m 开阔 → FORWARD (与接入前一致)
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::FORWARD);
+
+    // 前方 0.8m 有坑 (CliffDown) → STOP
+    fusion.set_local_terrain(make_hm25_cell(0.8, 0.0, CellFlag::CliffDown), no_neg);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::STOP);
+
+    // 台阶 (ObstacleUp) / 过陡 (TooSteep) 同样 STOP
+    fusion.set_local_terrain(make_hm25_cell(0.8, 0.0, CellFlag::ObstacleUp), no_neg);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::STOP);
+    fusion.set_local_terrain(make_hm25_cell(0.8, 0.0, CellFlag::TooSteep), no_neg);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::STOP);
+
+    // 近场有坑 + 前向失明 (原行为 SLOW_FORWARD) → 仍 STOP (路1 优先级更高, 但低于悬崖)
+    fusion.set_local_terrain(make_hm25_cell(0.8, 0.0, CellFlag::CliffDown), no_neg);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, false)
+          == NavigationAction::STOP);
+    // 悬崖优先级仍在路1之上 (cliff=true → STOP, 与是否注入地形无关)
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, true, none, true, true)
+          == NavigationAction::STOP);
+
+    // 清除地形 → 回到基线 (回归: 不注入 = 零影响)
+    fusion.clear_local_terrain();
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::FORWARD);
+}
+
+static void test_terrain_mid_slow_and_dodge() {
+    AstraProDriver astra(true);
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    InfraRedSensor ir(true);
+    SensorFusion fusion(&astra, &ultrasonic, &ir);
+
+    const std::unordered_map<std::string, FusedObstacle> none;
+    GroundSegResult no_neg;
+
+    // 中距 1.5m 对称坑带 (走廊内平均 y≈0) → 降速
+    fusion.set_local_terrain(make_hm25_band(1.5, -0.3, 0.3, CellFlag::CliffDown), no_neg);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::SLOW_FORWARD);
+
+    // 走廊内偏左 (y≈+0.275) → 向右让
+    fusion.set_local_terrain(make_hm25_cell(1.5, 0.25, CellFlag::CliffDown), no_neg);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::TURN_RIGHT);
+
+    // 走廊内偏右 (y≈-0.275) → 向左让
+    fusion.set_local_terrain(make_hm25_cell(1.5, -0.25, CellFlag::CliffDown), no_neg);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::TURN_LEFT);
+
+    // 只降速不升级: 前方 20cm 障碍本应 BACKWARD → 仍 BACKWARD (中距地形不得改写更保守的动作)
+    fusion.set_local_terrain(make_hm25_band(1.5, -0.3, 0.3, CellFlag::CliffDown), no_neg);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 0.20, 400.0, false, none, true, true)
+          == NavigationAction::BACKWARD);
+
+    fusion.clear_local_terrain();
+}
+
+static void test_terrain_corridor_bounds_and_negative_points() {
+    AstraProDriver astra(true);
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    InfraRedSensor ir(true);
+    SensorFusion fusion(&astra, &ultrasonic, &ir);
+
+    const std::unordered_map<std::string, FusedObstacle> none;
+    GroundSegResult no_neg;
+
+    // 走廊外不干预: 横向 y=1.5m (机身侧外) → FORWARD
+    fusion.set_local_terrain(make_hm25_cell(0.8, 1.5, CellFlag::CliffDown), no_neg);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::FORWARD);
+
+    // 超出中距 (3.02m > 2.0m) → FORWARD
+    fusion.set_local_terrain(make_hm25_cell(3.0, 0.0, CellFlag::CliffDown), no_neg);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::FORWARD);
+
+    // 近界之外 (0.22m < 0.40m): 交给底部超声 (0.6m 盲区) → 本模块不干预
+    fusion.set_local_terrain(make_hm25_cell(0.20, 0.0, CellFlag::CliffDown), no_neg);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::FORWARD);
+
+    // P1 负障碍点 (2.5D 无平面 → hm.valid=false) → 仍 STOP (两路 OR)
+    GroundSegResult seg;
+    Point3D p; p.x = 0.8; p.y = 0.1; p.z = -0.5;
+    seg.negative_points.push_back(p);
+    HeightMap25Result invalid_hm;   // valid=false
+    fusion.set_local_terrain(invalid_hm, seg);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::STOP);
+
+    fusion.clear_local_terrain();
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::FORWARD);
+}
+
 int main() {
     test_cliff_valid_check();
     test_min_forward_valid_filter();
@@ -738,6 +881,9 @@ int main() {
     test_hw_unavailable_no_random();           // ALG-4
     test_determine_environment_depth_proxy_default();  // ALG-3
     test_depth_frame_usable_guard();           // FIX-01
+    test_terrain_near_block_stops();            // 路1: 近场地形 → STOP
+    test_terrain_mid_slow_and_dodge();          // 路1: 中距地形 → 降速/让开
+    test_terrain_corridor_bounds_and_negative_points();  // 路1: 走廊边界 + 负障碍点
 
     std::cout << "passed=" << g_passed << " failed=" << g_failed << std::endl;
     return g_failed == 0 ? 0 : 1;
