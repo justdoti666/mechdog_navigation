@@ -112,4 +112,47 @@ void transform_optical_to_link(const PointCloud& in, PointCloud& out);
 // ============================================================
 void transform_to_base(const PointCloud& in, const CameraExtrinsics& E,
                        PointCloud& out);
+
+// ============================================================
+// 机体姿态 (IMU 提供) —— 用法A: 感知侧重力对齐 / 门控
+// ============================================================
+/** 机体姿态采样 (相对重力)。
+ *  约定: pitch_deg > 0 = 机头抬起; roll_deg > 0 = 机体左侧抬起
+ *  (与 base_link 的 ZYX 内旋约定配套, 见 align_to_gravity)。 */
+struct AttitudeSample {
+    double pitch_deg = 0.0;   // 机体俯仰 (度)
+    double roll_deg  = 0.0;   // 机体横滚 (度)
+    double stamp_s   = 0.0;   // 采集时刻 (与深度帧同一时基, 秒)
+    bool   valid     = false; // false = 不补偿 (默认; 未接 IMU 时行为与接入前完全一致)
+};
+
+/** 重力对齐的门控结果 (供日志/统计可观测) */
+struct AttitudeGate {
+    bool        used   = false;     // 是否真的做了补偿
+    const char* reason = "invalid"; // "ok" | "invalid" | "stale" | "gate"
+};
+
+// ============================================================
+// 机体姿态 → 重力对齐 (用法A)
+//
+// 就地把"含机身姿态"的 base_link 系点云转到重力对齐系 (绕 base_link 原点):
+//     v_G = Rx(-roll) · Ry(-pitch) · v_B      (右乘先作用: 先俯仰, 后横滚)
+// 这是机体姿态 R_BG = Ry(pitch)·Rx(roll) 的严格逆 (base_link 的 ZYX 约定,
+// 忽略 yaw) —— 顺序不可交换, 组合俯仰+横滚时必须按此顺序。
+//
+// 语义: 补偿后地面平面法向回到 (0,0,1) ⇒ ground_segmentation 的
+//   plane_max_tilt_deg(默认 15°) 恢复为"真坡度预算", ground_prior_z(-0.18)
+//   恢复物理意义; 机身姿态不再"吃掉"坡度预算 (FIX-11 的失效场景).
+//
+// 门控 (fail-closed, 默认即安全):
+//   att.valid == false                     → 点云不动, gate{false,"invalid"}
+//   frame_stamp_s - att.stamp_s > max_age  → 点云不动, gate{false,"stale"}
+//   |pitch| 或 |roll| > gate_deg           → 点云不动, gate{false,"gate"}
+//   正常                                   → 补偿,      gate{true, "ok"}
+// 无效/过期/超门控时不做补偿(等价于现状), 由调用方决定是否进一步保守。
+// ============================================================
+void align_to_gravity(PointCloud& cloud, const AttitudeSample& att,
+                      double frame_stamp_s, double max_age_s, double gate_deg,
+                      AttitudeGate& gate);
+
 } // namespace mechdog

@@ -116,6 +116,15 @@ struct Hm25Snapshot {
     std::string stats;
 };
 static Hm25Snapshot g_hm25_snapshot;
+
+// ---- 用法A: 机体姿态 (IMU) —— 感知侧重力对齐/门控 ----
+// 数据源: (a) 命令行静态注入 (--att-pitch/--att-roll, 用于验证) 与
+//         (b) 外部馈入 (真机链路接上后, 把最新 pitch/roll/stamp 写进 g_attitude 即可;
+//             协议草案见 E:\33\mechdog_navigation_fixed\TECH_PLAN_IMU_ATTITUDE_FOR_PERCEPTION_2026-09-12.md 附录 A)
+static mechdog::AttitudeSample g_attitude;      // 默认 valid=false → 不补偿 (行为同接入前)
+static bool   g_att_cli_static = false;         // 静态注入: 每帧把 stamp 刷成当前帧 (视为实时)
+static const double kAttMaxAgeS = 0.30;         // 姿态过期阈值 (秒)
+static const double kAttGateDeg = 25.0;         // 姿态门控阈值 (度)
 // 诊断开关: 水平镜像深度图 (Astra 深度与 RGB 的左右关系存疑, 按 M 实测裁决)
 static std::atomic<bool> g_flip_depth{false};
 // 诊断开关: 深度热力图叠加 RGB (近=红 远=蓝; 对齐则热力落在实物上, 镜像则左右互换)
@@ -1000,6 +1009,14 @@ int main(int argc, char** argv) {
         if (arg == "--height" && i + 1 < argc) {        // 相机离地高(米), 实机标定点云用
             extr_height_m = atof(argv[++i]);
         }
+        if (arg == "--att-pitch" && i + 1 < argc) {     // 用法A: 静态注入机体俯仰(度, 抬头为正)
+            g_attitude.pitch_deg = atof(argv[++i]);
+            g_attitude.valid = true; g_att_cli_static = true;
+        }
+        if (arg == "--att-roll" && i + 1 < argc) {      // 用法A: 静态注入机体横滚(度, 左倾为正)
+            g_attitude.roll_deg = atof(argv[++i]);
+            g_attitude.valid = true; g_att_cli_static = true;
+        }
         if (arg == "--log-level" && i + 1 < argc) {     // 日志级别 D/I/W/E
             std::string lv(argv[++i]);
             if (lv == "D" || lv == "DEBUG")      mechdog::log::set_level(Level::Debug);
@@ -1207,6 +1224,28 @@ int main(int argc, char** argv) {
                 }
                 PointCloud cloud_base;
                 transform_to_base(cloud_opt_ds, cloud_E, cloud_base);
+
+                // ---- 用法A: 机体姿态重力对齐 ----
+                // 语义: 把"含机身姿态"的点云转到重力对齐系 ⇒ 地面分割的 15° 容限
+                // 恢复为"真坡度预算"、ground_prior_z(-0.18) 恢复物理意义。
+                // 门控(fail-closed): 无姿态(默认)/过期/超门控 ⇒ 点云不动, 与接入前完全一致。
+                {
+                    mechdog::AttitudeSample att = g_attitude;
+                    if (g_att_cli_static) att.stamp_s = frame.timestamp;  // 静态注入视为实时
+                    mechdog::AttitudeGate att_gate;
+                    mechdog::align_to_gravity(cloud_base, att, frame.timestamp,
+                                              kAttMaxAgeS, kAttGateDeg, att_gate);
+                    static int att_last_used = -1;
+                    const int att_cur = att_gate.used ? 1 : 0;
+                    if (att_cur != att_last_used) {     // 状态变化时打一次 (可观测)
+                        att_last_used = att_cur;
+                        LOG_INFO("[att] 重力对齐 used=" << att_cur
+                                 << " reason=" << att_gate.reason
+                                 << " pitch=" << att.pitch_deg
+                                 << " roll=" << att.roll_deg);
+                    }
+                }
+
                 GroundSegResult seg;
                 segment_ground(cloud_base, gseg_params, seg);
 

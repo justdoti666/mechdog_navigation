@@ -187,4 +187,42 @@ void screen_decimate(const PointCloud& in, double px_per_m, PointCloud& out) {
     }
 }
 
+// ============================================================
+// 用法A: 机体姿态重力对齐 (接口/语义/门控规则见 point_cloud.h)
+// ============================================================
+void align_to_gravity(PointCloud& cloud, const AttitudeSample& att,
+                      double frame_stamp_s, double max_age_s, double gate_deg,
+                      AttitudeGate& gate) {
+    gate.used   = false;
+    gate.reason = "invalid";
+    if (!att.valid) return;                                   // 无姿态 → 不补偿(现行为)
+    if (frame_stamp_s - att.stamp_s > max_age_s) {             // 过期
+        gate.reason = "stale";
+        return;
+    }
+    if (std::fabs(att.pitch_deg) > gate_deg ||
+        std::fabs(att.roll_deg) > gate_deg) {                  // 超门控
+        gate.reason = "gate";
+        return;
+    }
+
+    const double D2R = 0.01745329251994329576;
+    const double cp = std::cos(att.pitch_deg * D2R), sp = std::sin(att.pitch_deg * D2R);
+    const double cr = std::cos(att.roll_deg  * D2R), sr = std::sin(att.roll_deg  * D2R);
+
+    // v_G = Rx(-roll) · Ry(-pitch) · v_B  (右乘先作用: 先俯仰, 后横滚)
+    // 顺序不可交换: 这是 R_BG = Ry(pitch)·Rx(roll) 的严格逆 (ZYX, 忽略 yaw)
+    for (auto& p : cloud.points) {
+        const double x1 =  p.x * cp - p.z * sp;   // Ry(-pitch)
+        const double z1 =  p.x * sp + p.z * cp;
+        const double y2 =  p.y * cr + z1 * sr;    // Rx(-roll)
+        const double z2 = -p.y * sr + z1 * cr;
+        p.x = x1;
+        p.y = y2;
+        p.z = z2;
+    }
+    gate.used   = true;
+    gate.reason = "ok";
+}
+
 } // namespace mechdog
