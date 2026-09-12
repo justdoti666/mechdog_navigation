@@ -540,6 +540,66 @@ static void test_transform_to_base_frame_contract() {
     CHECK(std::fabs(out.points[0].z - viaFn.points[0].z) < 1e-9);
 }
 
+// ============================================================
+// 用法A 单元: 重力对齐 align_to_gravity
+// 约定: pitch>0 = 机头抬起; 补偿做的是 p_out = Rx(-roll)·Ry(-pitch)·p_in
+// ============================================================
+static void test_align_to_gravity_unit() {
+    const double D2R = 0.01745329251994329576;
+
+    PointCloud base;
+    Point3D p; p.x = 1.0; p.y = 0.5; p.z = -0.18; base.points.push_back(p);
+    AttitudeSample att;              // 默认 valid=false
+    AttitudeGate   gate;
+
+    // ① 无姿态 → 点云逐位不动 (A1 回归: 不接 IMU = 现行为)
+    PointCloud c = base;
+    align_to_gravity(c, att, 100.0, 0.30, 25.0, gate);
+    CHECK(!gate.used);
+    CHECK(std::string(gate.reason) == "invalid");
+    CHECK(c.points[0].x == 1.0 && c.points[0].y == 0.5 && c.points[0].z == -0.18);
+
+    // ② 过期 (age 1.0s > 0.30s) → 不补偿
+    att.valid = true; att.pitch_deg = 10.0; att.stamp_s = 99.0;
+    c = base;
+    align_to_gravity(c, att, 100.0, 0.30, 25.0, gate);
+    CHECK(!gate.used);
+    CHECK(std::string(gate.reason) == "stale");
+    CHECK(c.points[0].x == 1.0);
+
+    // ③ 超门控 (|pitch|30° > 25°) → 不补偿
+    att.stamp_s = 100.0; att.pitch_deg = 30.0;
+    c = base;
+    align_to_gravity(c, att, 100.0, 0.30, 25.0, gate);
+    CHECK(!gate.used);
+    CHECK(std::string(gate.reason) == "gate");
+
+    // ④ 符号/轴向 (A7): 机体上方向量 (0,0,1) + 抬头 10° → 重力系 (-sin10°, 0, cos10°)
+    PointCloud up;
+    Point3D q; q.x = 0.0; q.y = 0.0; q.z = 1.0; up.points.push_back(q);
+    att.pitch_deg = 10.0; att.roll_deg = 0.0;
+    align_to_gravity(up, att, 100.0, 0.30, 25.0, gate);
+    CHECK(gate.used);
+    CHECK(std::string(gate.reason) == "ok");
+    CHECK(std::fabs(up.points[0].x + std::sin(10.0 * D2R)) < 1e-9);
+    CHECK(std::fabs(up.points[0].z - std::cos(10.0 * D2R)) < 1e-9);
+
+    // ⑤ 单位性: 平地云 + 姿态 → 补偿是刚体变换 (点数/两两距离不变)
+    PointCloud flat;
+    for (double x = 0.5; x <= 2.0; x += 0.1) {
+        Point3D r; r.x = x; r.y = 0.0; r.z = -0.18; flat.points.push_back(r);
+    }
+    const size_t n0 = flat.points.size();
+    const double d0 = std::hypot(flat.points[0].x - flat.points[n0 - 1].x,
+                                 flat.points[0].z - flat.points[n0 - 1].z);
+    att.pitch_deg = 12.0;
+    align_to_gravity(flat, att, 100.0, 0.30, 25.0, gate);
+    const double d1 = std::hypot(flat.points[0].x - flat.points[n0 - 1].x,
+                                 flat.points[0].z - flat.points[n0 - 1].z);
+    CHECK(flat.points.size() == n0);
+    CHECK(std::fabs(d1 - d0) < 1e-9);       // 刚体: 距离保持
+}
+
 int main() {
     test_backprojection_plane();
     test_intrinsics_center_pixel();
@@ -557,6 +617,7 @@ int main() {
     test_cloud_state_label();
     test_screen_decimate();
     test_transform_to_base_frame_contract();   // FIX-10
+    test_align_to_gravity_unit();              // 用法A: 重力对齐单元测试
 
     std::cout << "passed=" << g_passed << " failed=" << g_failed << std::endl;
     return g_failed == 0 ? 0 : 1;

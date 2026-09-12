@@ -207,6 +207,161 @@ static void test_perf_smoke() {
     CHECK(!r.negative_points.empty());
 }
 
+// ============================================================
+// 用法A: 机体姿态重力对齐 —— 恢复被机身姿态吃掉的坡度预算
+//
+// 场景构造: 先在"重力对齐系"里造地面, 再用 Ry(pitch)·Rx(roll) 转到
+//   "含机身姿态的机体系" (v_B = R(θ)·v_G), 等价于狗在姿态 θ 下看到的点云。
+// 对照: 同一份点云 ①不补偿(= 现状, FIX-11 的失效) ②补偿后(= 目标行为)。
+// ============================================================
+static const double kAttD2R = 0.01745329251994329576;
+
+// 重力系点阵 → 机体系 (机体抬头 pitch_deg / 左倾 roll_deg)
+static PointCloud body_frame_from_gravity(const PointCloud& g,
+                                          double pitch_deg, double roll_deg) {
+    const double cp = std::cos(pitch_deg * kAttD2R), sp = std::sin(pitch_deg * kAttD2R);
+    const double cr = std::cos(roll_deg * kAttD2R),  sr = std::sin(roll_deg * kAttD2R);
+    PointCloud out;
+    out.points.reserve(g.points.size());
+    for (const auto& q : g.points) {
+        const double x1 = q.x;                                  // Rx(roll)
+        const double y1 = q.y * cr - q.z * sr;
+        const double z1 = q.y * sr + q.z * cr;
+        Point3D p;
+        p.x =  x1 * cp + z1 * sp;                                // Ry(pitch)
+        p.y =  y1;
+        p.z = -x1 * sp + z1 * cp;
+        out.points.push_back(p);
+    }
+    return out;
+}
+
+// 施加补偿 (姿态新鲜有效): 期望 gate.used == true
+static void compensate(PointCloud& c, double pitch_deg, double roll_deg) {
+    AttitudeSample att;
+    att.pitch_deg = pitch_deg;
+    att.roll_deg  = roll_deg;
+    att.stamp_s   = 100.0;
+    att.valid     = true;
+    AttitudeGate gate;
+    align_to_gravity(c, att, 100.0, 0.30, 25.0, gate);
+    CHECK(gate.used);
+}
+
+// A2: 平地 + 机体俯仰/横滚 10° —— 不补偿时平面"看起来"倾斜 10°, 补偿后回到竖直
+static void test_attitude_flat_budget() {
+    PointCloud g;
+    add_ground_patch(g, 0.5, 2.2, -1.5, 1.5, 0.06, [](double, double) { return -0.18; });
+
+    // 俯仰
+    PointCloud body_p = body_frame_from_gravity(g, 10.0, 0.0);
+    auto r0 = run_seg(body_p);
+    CHECK(r0.plane.valid);
+    CHECK(r0.plane.nz < std::cos(9.0 * kAttD2R));      // 机体系里倾斜 ≈10°
+
+    PointCloud c_p = body_p; compensate(c_p, 10.0, 0.0);
+    auto r1 = run_seg(c_p);
+    CHECK(r1.plane.valid);
+    CHECK(r1.plane.nz > 0.999);                        // 补偿后法向竖直
+
+    // 横滚 (同一个正交变换的另一轴)
+    PointCloud body_r = body_frame_from_gravity(g, 0.0, 10.0);
+    PointCloud c_r = body_r; compensate(c_r, 0.0, 10.0);
+    auto r2 = run_seg(c_r);
+    CHECK(r2.plane.valid);
+    CHECK(r2.plane.nz > 0.999);
+}
+
+// A3: 物理上坡 10° + 机体**前俯** 10° (姿态与坡度反向) → 机体系表观倾角 20° > 15°
+//     推导: 重力系坡面法向 n_G=(-sinφ,0,cosφ), 机体系 n_B=Ry(θ)·n_G
+//           ⇒ 表观倾角 = |θ - φ| (θ 抬头为正, φ 上坡为正)
+//     不补偿: 丢平面(坡被当障碍); 补偿后: 恢复为 10° 坡 → 可通行
+static void test_attitude_slope_budget() {
+    PointCloud g;
+    add_ground_patch(g, 0.5, 2.2, -1.5, 1.5, 0.06,
+                     [](double x, double) { return -0.18 + std::tan(10.0 * kAttD2R) * x; });
+    PointCloud body = body_frame_from_gravity(g, -10.0, 0.0);   // 机体前俯 10°
+
+    auto r0 = run_seg(body);
+    CHECK(!r0.plane.valid);                // ← FIX-11 失效复现: |−10−10| = 20° > 15°
+
+    PointCloud c = body; compensate(c, -10.0, 0.0);
+    auto r1 = run_seg(c);
+    CHECK(r1.plane.valid);                             // 补偿后只剩 10° 坡度, 可识别
+    CHECK(r1.plane.nz > std::cos(11.0 * kAttD2R));
+    CHECK(r1.ground_indices.size() > 500);
+    CHECK(r1.negative_points.empty());                 // 坡不是坑
+}
+
+// A3b: 姿态与坡度**一致** (机体抬头 10° 走 10° 上坡) → 表观倾角 |10-10| = 0°
+//      两态都能识别 ⇒ 诚实标注适用范围: 补偿的价值在"姿态与坡度反向"
+//      或"姿态本身超过容限(见 A4)", 而非所有坡道场景
+static void test_attitude_slope_aligned() {
+    PointCloud g;
+    add_ground_patch(g, 0.5, 2.2, -1.5, 1.5, 0.06,
+                     [](double x, double) { return -0.18 + std::tan(10.0 * kAttD2R) * x; });
+    PointCloud body = body_frame_from_gravity(g, 10.0, 0.0);
+
+    auto r0 = run_seg(body);
+    CHECK(r0.plane.valid);                             // 不补偿也已"平" (表观 0°)
+
+    PointCloud c = body; compensate(c, 10.0, 0.0);
+    auto r1 = run_seg(c);
+    CHECK(r1.plane.valid);
+    CHECK(r1.plane.nz > std::cos(11.0 * kAttD2R));     // 补偿后 = 真实 10° 坡, 仍在容限内
+}
+
+// A4: 平地 + 机体俯仰 16° (> 15° 容限) —— 不补偿时连平地都被拒
+static void test_attitude_extreme_pitch() {
+    PointCloud g;
+    add_ground_patch(g, 0.5, 2.2, -1.5, 1.5, 0.06, [](double, double) { return -0.18; });
+    PointCloud body = body_frame_from_gravity(g, 16.0, 0.0);
+
+    auto r0 = run_seg(body);
+    CHECK(!r0.plane.valid);                            // 平地也判"过陡" → 丢平面
+
+    PointCloud c = body; compensate(c, 16.0, 0.0);
+    auto r1 = run_seg(c);
+    CHECK(r1.plane.valid);
+    CHECK(r1.ground_indices.size() > 500);
+}
+
+// A5: 高度先验一致性 —— 补偿后 height_at_origin ≈ -0.18 (θ ∈ {0,10,20})
+static void test_attitude_prior_consistency() {
+    PointCloud g;
+    add_ground_patch(g, 0.5, 2.2, -1.5, 1.5, 0.06, [](double, double) { return -0.18; });
+    for (double th : {0.0, 10.0, 20.0}) {
+        PointCloud body = body_frame_from_gravity(g, th, 0.0);
+        compensate(body, th, 0.0);
+        auto r = run_seg(body);
+        CHECK(r.plane.valid);
+        CHECK(std::abs(r.plane.height_at_origin() + 0.18) < 0.02);
+    }
+}
+
+// A2c: 组合俯仰 + 横滚 —— 锁死旋转**顺序**(ZYX 逆序不可交换)
+//      平地在机体 15°俯仰+15°横滚 下变成斜面; 补偿后必须严格回到水平;
+//      若顺序写反, 残差 ~ p·r (≈3.9°) → z 起伏 ~0.14m, 必然被抓。
+static void test_attitude_combined_tilt() {
+    PointCloud g;
+    add_ground_patch(g, 0.5, 2.2, -1.5, 1.5, 0.06, [](double, double) { return -0.18; });
+    PointCloud body = body_frame_from_gravity(g, 15.0, 15.0);
+
+    double zmin = 1e9, zmax = -1e9, zsum = 0.0;
+    for (const auto& p : body.points) {
+        zmin = (std::min)(zmin, p.z); zmax = (std::max)(zmax, p.z); zsum += p.z;
+    }
+    CHECK(zmax - zmin > 0.5);                 // 机体系里确实变成了斜面
+
+    compensate(body, 15.0, 15.0);
+    zmin = 1e9; zmax = -1e9; zsum = 0.0;
+    for (const auto& p : body.points) {
+        zmin = (std::min)(zmin, p.z); zmax = (std::max)(zmax, p.z); zsum += p.z;
+    }
+    CHECK(zmax - zmin < 1e-6);                // 补偿后严格水平 (顺序错必失败)
+    CHECK(std::fabs(zsum / static_cast<double>(body.points.size()) + 0.18) < 1e-6);
+}
+
 int main() {
     std::cout << "=== ground segmentation tests ===" << std::endl;
     test_baseline_flat_ground();
@@ -217,6 +372,12 @@ int main() {
     test_wall_only_fail_closed();
     test_degenerate_inputs();
     test_perf_smoke();
+    test_attitude_flat_budget();          // 用法A A2
+    test_attitude_combined_tilt();        // 用法A A2c (锁旋转顺序)
+    test_attitude_slope_budget();         // 用法A A3
+    test_attitude_slope_aligned();        // 用法A A3b (姿态与坡度一致)
+    test_attitude_extreme_pitch();        // 用法A A4
+    test_attitude_prior_consistency();    // 用法A A5
     std::cout << "=== " << g_checks << " checks, " << g_fail << " failed ===" << std::endl;
     return g_fail == 0 ? 0 : 1;
 }
