@@ -27,7 +27,14 @@ FusionResult SensorFusion::fuse() {
 
     // 1. 获取原始传感器数据
     auto astra_frame = astra_->get_latest_frame();
-    auto ultrasonic_data = ultrasonic_->read_all();
+    // v2.5: 超声链路可被显式禁用 (真机无超声硬件/无数据源时) ——
+    //   禁用时完全不碰驱动: 数据保持"全无效"(而非读回模拟随机数),
+    //   且下面第 5 步不做悬崖判定 (否则 bottom 的 fail-closed 会恒判有风险 → 永远 STOP)。
+    UltrasonicArrayData ultrasonic_data;   // 默认全无效 (valid=false)
+    const bool ultra_on = ultrasonic_enabled_;
+    if (ultra_on) {
+        ultrasonic_data = ultrasonic_->read_all();
+    }
 
     // 2. 判断环境类型
     auto env_type = determine_environment(astra_frame);
@@ -48,8 +55,9 @@ FusionResult SensorFusion::fuse() {
     // 5. 底部悬崖检测（仅超声波）
     // ALG-1 (v2.2): 改用 is_fall_risk() —— 独立 20Hz bottom 线程的 fail-closed 判定,
     // 不再依赖同周期 read_all 的 bottom (后者现仅为缓存值, 供 build_bottom_obstacle 用)
+    // v2.5: 超声链路被禁用时该层整体停用 (无数据源 → 不能把 fail-closed 变成"永久停" )
     const auto& bottom = ultrasonic_data.bottom;
-    result.cliff_detected = ultrasonic_->is_fall_risk();
+    result.cliff_detected = ultra_on ? ultrasonic_->is_fall_risk() : false;
     result.obstacles["bottom"] = build_bottom_obstacle(bottom, result.cliff_detected);
 
     // 6. 计算综合决策 (A1: 只统计有效方向的距离; 全失效的 8.0m 兜底值不参与)

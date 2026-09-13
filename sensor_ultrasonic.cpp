@@ -37,6 +37,22 @@ bool UltrasonicArrayData::get_cliff_detected() const {
     return !bottom.valid || bottom.distance_cm > UltrasonicConfig::cliff_threshold_cm;
 }
 
+// v2.5: 硬件可用性 / 是否在消费模拟数据 —— 供上层在真机上拒绝假数据
+bool UltrasonicArrayDriver::is_hardware_available() const {
+    if (sensors_.empty()) return false;
+    for (const auto& [name, s] : sensors_) {
+        (void)name;
+        if (!s || !s->is_hardware_available()) return false;
+    }
+    return true;
+}
+
+bool UltrasonicArrayDriver::is_using_simulated_data() const {
+    if (is_hardware_available()) return false;
+    // 有新鲜外部注入时不看硬件 (注入优先, 与 read_all 同口径)
+    return !has_external_data();
+}
+
 // ============================================================
 // UltrasonicSensor
 // ============================================================
@@ -49,6 +65,7 @@ UltrasonicSensor::UltrasonicSensor(const std::string& name, int trig_pin, int ec
 {
 #ifdef USE_WIRINGPI
     setup_gpio();
+    hw_available_ = true;   // 编译进了 GPIO 支持 (注: 原实现不检查 wiringPiSetup 返回值)
 #else
     std::cout << "[超声] RPi.GPIO 不可用，使用模拟模式" << std::endl;
 #endif

@@ -94,6 +94,18 @@ public:
     /** 路1: 清除近场地形 (退出点云分支/无地形数据时调用) */
     void clear_local_terrain();
 
+    /**
+     * v2.5: 显式启用/禁用**超声链路** (默认启用 = 接入前行为, 零行为变化)。
+     *
+     * 为什么需要它: 真机上若超声无硬件/无数据源, 驱动会回落**模拟随机数**并带
+     * valid=true 混进融合 (模拟器还有"底部 5% 概率造悬崖"), 而 bottom 的 fail-closed
+     * 又会让 is_fall_risk() 恒 true → 结果要么被随机数带偏, 要么永远 STOP。
+     * 禁用后: 超声不参与融合, 也不作悬崖判定 —— 由上层负责打印醒目警告,
+     * 并在硬件/话题恢复后重新启用。
+     */
+    void set_ultrasonic_enabled(bool on) { ultrasonic_enabled_ = on; }
+    bool ultrasonic_enabled() const { return ultrasonic_enabled_; }
+
 private:
     // 单元测试访问 (tests/test_fusion.cpp 专用, R-3: 测试调用真函数而非复刻逻辑)
     friend class SensorFusionTestAccess;
@@ -105,6 +117,8 @@ private:
     // 路1: 近场地形状态 (由 set_local_terrain 刷新, 供 determine_action 读取)
     bool   terrain_near_      = false; // 近场走廊 (0.4~1.2m) 命中禁行地形
     bool   terrain_mid_       = false; // 中距 (1.2~2.0m) 命中禁行地形
+    // v2.5: 超声链路开关 (false = 不读超声/不作悬崖判定; 上层在无硬件或无数据源时置 false)
+    bool   ultrasonic_enabled_ = true;
     double terrain_x_         = 0.0;   // 最近命中处 x (诊断)
     double terrain_mid_side_  = 0.0;   // 中距命中的平均 y (>0 偏左, <0 偏右)
     int    terrain_mid_count_ = 0;     // 中距命中数

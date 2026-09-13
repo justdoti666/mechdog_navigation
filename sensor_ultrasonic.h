@@ -60,7 +60,14 @@ public:
     /** 清理资源 */
     void cleanup();
 
-private:
+    /**
+     * 本传感器是否真在驱动硬件 (而非编译期回落模拟)。
+     * 未编译 USE_WIRINGPI 时恒 false —— 此时测距全是随机模拟值 (含"5% 概率模拟悬崖"),
+     * 安全链**不得**消费它, 见 UltrasonicArrayDriver::is_using_simulated_data()。
+     */
+    bool is_hardware_available() const { return hw_available_; }
+
+ private:
     std::string name_;
     int         trig_pin_;
     int         echo_pin_;
@@ -68,6 +75,7 @@ private:
     double      pitch_offset_deg_;
     std::chrono::steady_clock::time_point last_measure_{};  // 上次测量时刻 (修复: 原 double 存纳秒计数被当秒读, 单位错乱)
     std::mt19937 rng_;  // 模拟模式用
+    bool        hw_available_ = false;  // GPIO 就绪 (仅 USE_WIRINGPI 编译时可能为 true)
 
 #ifdef USE_WIRINGPI
     void setup_gpio();
@@ -106,6 +114,17 @@ public:
     void inject_external_data(const UltrasonicArrayData& data);
     void set_inject_timeout_sec(double sec) { inject_timeout_sec_ = sec; }
     bool has_external_data() const;
+
+    /** 全部传感器硬件就绪? (任一未就绪即 false; 未编译 GPIO 支持时恒 false) */
+    bool is_hardware_available() const;
+
+    /**
+     * 当前是否会读到**模拟(随机)数据** = 硬件不可用 且 无新鲜外部注入。
+     * true 时上层必须拒绝把它喂进安全链 —— 模拟数据带 valid=true, 融合层分不出来,
+     * 且 simulate_measure() 有"底部 5% 概率模拟悬崖"→ 会随机制造 STOP。
+     * (v2.5: 真机模式默认先禁用超声, 或改用 /ultrasonic 话题注入)
+     */
+    bool is_using_simulated_data() const;
 
     /** 清理所有传感器资源 */
     void cleanup();

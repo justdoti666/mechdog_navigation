@@ -861,6 +861,48 @@ static void test_terrain_corridor_bounds_and_negative_points() {
           == NavigationAction::FORWARD);
 }
 
+// v2.5: 超声链路可被**显式禁用** —— 真机上无超声硬件/无数据源时, 不能把"模拟随机数"
+// (带 valid=true, 且底部 5% 概率造悬崖) 或"bottom fail-closed 永久判悬崖"带进决策。
+// 禁用后: 悬崖层停用、超声不参与融合, 深度照常工作; 且可逆 (恢复后可再启用)。
+static void test_ultrasonic_disabled_removes_cliff_layer() {
+    AstraProDriver astra(false);          // 不 start(): 用注入帧保证三次 fuse 看到同一帧
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    InfraRedSensor ir(true);
+    SensorFusion fusion(&astra, &ultrasonic, &ir);
+
+    // 固定深度: 前方 1.5m 墙面 (v2.4 注入接口)
+    std::vector<uint16_t> wall(640 * 480, 1500);
+    CHECK(astra.inject_depth_frame(wall, 640, 480, 100.0) == true);
+
+    // 超声: 前向 120cm, 底部 >30cm (有跌落风险)
+    UltrasonicArrayData u;
+    u.timestamp = 0.0;
+    u.front_left.valid = u.front_center.valid = u.front_right.valid = true;
+    u.front_left.distance_cm = u.front_center.distance_cm = u.front_right.distance_cm = 120.0;
+    u.bottom.valid = true;
+    u.bottom.distance_cm = UltrasonicConfig::cliff_threshold_cm + 20.0;
+    ultrasonic.inject_external_data(u);
+
+    auto r1 = fusion.fuse();
+    CHECK(r1.cliff_detected == true);                        // 悬崖层生效
+    CHECK(r1.recommended_action == NavigationAction::STOP);
+
+    // 禁用超声 → 悬崖层停用 (不是"永久停"), 决策回到深度
+    fusion.set_ultrasonic_enabled(false);
+    CHECK(fusion.ultrasonic_enabled() == false);
+    auto r2 = fusion.fuse();
+    CHECK(r2.cliff_detected == false);
+    CHECK(r2.sensors_valid == true);                         // 深度仍在 → 不算全失效
+    CHECK(r2.min_forward_distance_m > 1.2 && r2.min_forward_distance_m < 1.8);  // 仅由深度决定
+    CHECK(r2.recommended_action == NavigationAction::FORWARD);
+
+    // 可逆: 重新启用 → 悬崖判定恢复
+    fusion.set_ultrasonic_enabled(true);
+    auto r3 = fusion.fuse();
+    CHECK(r3.cliff_detected == true);
+    CHECK(r3.recommended_action == NavigationAction::STOP);
+}
+
 int main() {
     test_cliff_valid_check();
     test_min_forward_valid_filter();
@@ -884,6 +926,7 @@ int main() {
     test_terrain_near_block_stops();            // 路1: 近场地形 → STOP
     test_terrain_mid_slow_and_dodge();          // 路1: 中距地形 → 降速/让开
     test_terrain_corridor_bounds_and_negative_points();  // 路1: 走廊边界 + 负障碍点
+    test_ultrasonic_disabled_removes_cliff_layer();      // v2.5: 超声链路可禁用 (真机无硬件)
 
     std::cout << "passed=" << g_passed << " failed=" << g_failed << std::endl;
     return g_failed == 0 ? 0 : 1;
