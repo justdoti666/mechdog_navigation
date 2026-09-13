@@ -42,6 +42,11 @@ struct GroundSegParams {
     double neg_far_m          = GroundSegConfig::neg_far_m;
     int    min_gap_cells      = GroundSegConfig::min_gap_cells;
     unsigned seed             = 20260830u;  // 固定默认种子: 单测/复现确定性
+    // v2.7: 地面提取方法开关。false(默认) = 受约束 RANSAC (行为与历史逐字节一致);
+    //   true = 先用确定性"格最小拟合"(见 fit_ground_plane_cells), 失败才回退 RANSAC。
+    //   动因: RANSAC 从 1.2m 高候选带盲抽三点却要求 h0 落在 ±prior_window ⇒ 命中靠运气
+    //   (真机实测: step=8 能拟合、step=1 反而找不到; 窗口 0.10↔0.15 结果翻车)。
+    bool     use_cell_min_fit  = false;
 };
 
 /** 拟合出的地面平面: nx*x + ny*y + nz*z + d = 0, 单位法向且 nz > 0 (指向天空) */
@@ -65,6 +70,27 @@ struct GroundSegResult {
  * 入口. 输入必须已是 base_link 系点云 (调用方先 transform_to_base).
  * 确定性: 固定 seed 下结果可复现; O(ransac_iters * n + cells).
  */
+/**
+ * v2.7: 确定性地面提取 —— "按 (x,y) 小格取最低表面 → 两轮稳健最小二乘拟合"。
+ *
+ * 为什么需要它 (真机实测 2026-09-13, 相机俯视地板, 帧6):
+ *   受约束 RANSAC 从 1.2m 高的候选带里随机抽三点, 却要求 h0 落在 ±prior_window 内
+ *   ⇒ 命中靠运气: 同帧 step=8 能拟合而 step=1 (更稠密) 反而"找不到平面"; 窗口
+ *   0.10↔0.15 结果翻车; 拟合出的平面常偏高/偏斜 (tilt 7~15°), 于是地板点被全判
+ *   "凸起"、2.5D traversable 恒 0。
+ *
+ * 本方法无随机数: 相机俯视时, 每个 (x,y) 小格里**最低的那层表面就是地板**
+ * (桌上物体/椅子腿都在其上)。对"格最低值"做最小二乘 → 按残差剔除离群 → 再拟合一次。
+ * 实测同一帧: 稳定得到 841 格、地板倾角 13.34°、原点高度 -0.702m (与"相机离地"吻合)。
+ *
+ * @param p   用 cell_size / plane_max_tilt_deg / ground_prior_z / prior_window /
+ *            ransac_inlier_dist / point_on_plane_eps
+ * @return true = 得到合格平面 (写入 out, nz>0, 已归一化); false = 样本不足 /
+ *         倾角超限 / 高度先验不合格 ⇒ **调用方必须回退 RANSAC**
+ */
+bool fit_ground_plane_cells(const PointCloud& cloud, const GroundSegParams& p,
+                            GroundPlane& out);
+
 void segment_ground(const PointCloud& cloud_base,
                     const GroundSegParams& params,
                     GroundSegResult& out);

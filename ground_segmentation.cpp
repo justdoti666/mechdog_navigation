@@ -6,8 +6,10 @@
 #include "ground_segmentation.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <random>
 
 namespace mechdog {
@@ -40,12 +42,122 @@ struct GridCell {
 
 } // namespace
 
+// ============================================================
+// v2.7: 确定性地面提取 (格最小拟合) —— 见头文件说明
+// ============================================================
+namespace {
+// 最小二乘 z = a*x + b*y + c (对给定点集); 返回 false = 退化 (点太少/共线)
+bool lsq_plane_zy(const std::vector<std::array<double, 3>>& q,
+                  double& a, double& b, double& c) {
+    if (q.size() < 3) return false;
+    double Sx = 0, Sy = 0, Sxx = 0, Syy = 0, Sxy = 0, Sz = 0, Sxz = 0, Syz = 0;
+    const double n = static_cast<double>(q.size());
+    for (const auto& p : q) {
+        Sx += p[0]; Sy += p[1]; Sxx += p[0] * p[0]; Syy += p[1] * p[1];
+        Sxy += p[0] * p[1]; Sz += p[2]; Sxz += p[0] * p[2]; Syz += p[1] * p[2];
+    }
+    double M[3][4] = {{Sxx, Sxy, Sx, Sxz}, {Sxy, Syy, Sy, Syz}, {Sx, Sy, n, Sz}};
+    for (int i = 0; i < 3; ++i) {
+        int piv = i;
+        for (int r = i + 1; r < 3; ++r) if (std::abs(M[r][i]) > std::abs(M[piv][i])) piv = r;
+        for (int cc = 0; cc < 4; ++cc) std::swap(M[i][cc], M[piv][cc]);
+        if (std::abs(M[i][i]) < 1e-12) return false;
+        for (int r = 0; r < 3; ++r) {
+            if (r == i) continue;
+            const double f = M[r][i] / M[i][i];
+            for (int cc = i; cc < 4; ++cc) M[r][cc] -= f * M[i][cc];
+        }
+    }
+    a = M[0][3] / M[0][0]; b = M[1][3] / M[1][1]; c = M[2][3] / M[2][2];
+    return std::isfinite(a) && std::isfinite(b) && std::isfinite(c);
+}
+} // namespace
+
+bool fit_ground_plane_cells(const PointCloud& cloud, const GroundSegParams& p,
+                            GroundPlane& out) {
+    out = GroundPlane{};
+    const double cs = (p.cell_size > 0.01) ? p.cell_size : 0.01;
+
+    // ① 每个 (x,y) 小格取最低 z (地板; 桌上物体/椅子腿都在其上)
+    //    ★ 只统计"近场 + 高度在先验带附近"的格: 不加限制时桌面/墙/远处地面会把最小二乘拉偏。
+    //    注意用 **盒子** 而不是对称视锥 —— 实测台架相机除了俯仰还**偏航**(base 系 y 全负、跨 4m),
+    //    "|y| ≤ 0.56x" 这类对称锥会把点全滤掉 (踩过)。
+    const double y_half = 1.5;                         // 横向半宽 (近场地面; 与标定工具口径一致)
+    const double x_lo = std::max(0.2, p.neg_near_m - 0.4);
+    const double x_hi = p.neg_far_m + 0.5;
+    const double z_lo = p.ground_prior_z - p.prior_window - 0.6;   // 容忍更深 (坑底)
+    const double z_hi = p.ground_prior_z + p.prior_window;
+    std::map<std::pair<int, int>, double> lowest;
+    for (const auto& q : cloud.points) {
+        if (!std::isfinite(q.x) || !std::isfinite(q.y) || !std::isfinite(q.z)) continue;
+        if (q.x < x_lo || q.x > x_hi) continue;
+        if (std::abs(q.y) > y_half) continue;
+        if (q.z < z_lo || q.z > z_hi) continue;
+        const auto key = std::make_pair(static_cast<int>(std::floor(q.x / cs)),
+                                        static_cast<int>(std::floor(q.y / cs)));
+        auto it = lowest.find(key);
+        if (it == lowest.end() || q.z < it->second) it = lowest.emplace(key, q.z).first, it->second = q.z;
+    }
+    if (lowest.size() < 20) return false;   // 样本不足 → 交给 RANSAC
+
+    std::vector<std::array<double, 3>> q;
+    q.reserve(lowest.size());
+    for (const auto& [key, z] : lowest) {
+        q.push_back({(key.first + 0.5) * cs, (key.second + 0.5) * cs, z});
+    }
+
+    // ② 三级递减阈值稳健最小二乘 (pass0 宽松 → pass2 收紧):
+    //    初始 LSQ 会被桌面/物体格拉偏, 用紧阈值会一次性把地板格全刷掉 (实测踩过),
+    //    故先用宽松阈值收敛到主表面 (地板), 再逐级收紧剔除残余离群。
+    double a = 0, b = 0, c = 0;
+    if (!lsq_plane_zy(q, a, b, c)) return false;
+    const double pass_thr[3] = {0.20, 0.08, 0.03};
+    std::vector<std::array<double, 3>> keep;
+    for (int pass = 0; pass < 3; ++pass) {
+        keep.clear();
+        for (const auto& pt : q) {
+            const double r = pt[2] - (a * pt[0] + b * pt[1] + c);
+            if (std::abs(r) <= pass_thr[pass]) keep.push_back(pt);
+        }
+        if (keep.size() < 20) return false;
+        q = keep;
+        if (!lsq_plane_zy(q, a, b, c)) return false;
+    }
+
+    // ③ 归一化 + 约束校验 (与 RANSAC 同一套先验, 口径一致)
+    //    先把候选写进 out (即使校验不通过) —— 便于调用方/诊断看到"为什么被拒"
+    const double len = std::sqrt(a * a + b * b + 1.0);
+    const double nx = -a / len, ny = -b / len, nz = 1.0 / len;   // n ∝ (-a, -b, 1), nz>0
+    const double d = -c / len;                                    // z = ax+by+c ⇔ n·X + d = 0
+    const double h0 = -d / nz;                                    // = c
+    out.nx = nx; out.ny = ny; out.nz = nz; out.d = d;
+    {
+        int inl = 0;
+        for (const auto& pt : cloud.points) {
+            if (std::abs(nx * pt.x + ny * pt.y + nz * pt.z + d) <= p.ransac_inlier_dist) ++inl;
+        }
+        out.inliers = inl;
+    }
+    const double cos_max_tilt = std::cos(p.plane_max_tilt_deg * kDegToRad);
+    if (nz < cos_max_tilt) return false;                          // 倾角超限 → 交给 RANSAC
+    if (std::abs(h0 - p.ground_prior_z) > p.prior_window) return false;  // 高度先验
+    out.valid = true;
+    return true;
+}
+
 void segment_ground(const PointCloud& cloud, const GroundSegParams& p,
                     GroundSegResult& out) {
     out = GroundSegResult{};
     const int n = static_cast<int>(cloud.points.size());
     if (n < 3) return;
     const auto& pts = cloud.points;
+
+    // ---- ⓪ (v2.7, 可选) 确定性地面提取优先, 失败回退 RANSAC ----
+    GroundPlane plane;
+    bool have_plane = false;
+    if (p.use_cell_min_fit) {
+        have_plane = fit_ground_plane_cells(cloud, p, plane);
+    }
 
     // ---- ① 受约束 RANSAC 拟合地面平面 ----
     // 候选预过滤: 地面点只可能出现在先验带及其下方 ~1m 内 (容忍先验偏差/坑底),
@@ -97,18 +209,20 @@ void segment_ground(const PointCloud& cloud, const GroundSegParams& p,
             }
         }
 
-        if (best.valid && best.inliers >= min_inliers) {
-            out.plane = best;
+        if (best.valid && best.inliers >= min_inliers) { plane = best; have_plane = true; }
+    }
+
+    if (have_plane) {
+        out.plane = plane;
             for (int i = 0; i < n; ++i) {
                 const auto& q = pts[i];
-                const double s = best.nx * q.x + best.ny * q.y + best.nz * q.z + best.d;
+                const double s = plane.nx * q.x + plane.ny * q.y + plane.nz * q.z + plane.d;
                 if (std::abs(s) <= p.point_on_plane_eps) {
                     out.ground_indices.push_back(i);
                 } else {
                     out.obstacle_indices.push_back(i);
                 }
             }
-        }
     }
 
     // fail-closed: 平面没拟合出来 → 不输出负障碍 (底部 HC-SR04 独立兜底)

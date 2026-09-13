@@ -362,7 +362,98 @@ static void test_attitude_combined_tilt() {
     CHECK(std::fabs(zsum / static_cast<double>(body.points.size()) + 0.18) < 1e-6);
 }
 
+// ============================================================
+// v2.7: 确定性地面提取 (格最小拟合) —— 锁真机痛点
+//   真机实测 (2026-09-13, 帧6 相机俯视地板): RANSAC 从 1.2m 高候选带盲抽三点、
+//   却要求 h0 落在 ±prior_window 内 ⇒ 命中靠运气: step=8 能拟合而 step=1(更稠密)
+//   反而"找不到平面"; 窗口 0.10↔0.15 结果翻车; 拟合平面偏高/偏斜 (tilt 7~15°),
+//   导致地板点全判"凸起"、2.5D traversable 恒 0。
+// ============================================================
+
+static Point3D mkpt(double x, double y, double z) {
+    Point3D p; p.x = x; p.y = y; p.z = z; return p;
+}
+
+// 平地板(z=floor_z, 5cm 网格) + **更稠密的倾斜干扰面** (h0 也落在先验窗内,
+// 倾角 11.3° < 15° 容限 ⇒ 旧 RANSAC 会被它骗走; 但它始终在地板之上 ⇒ 格最低值仍是地板)
+static PointCloud make_floor_with_contamination(double floor_z) {
+    PointCloud c;
+    c.frame_id = "base_link";
+    for (double x = 0.6; x <= 3.0 + 1e-9; x += 0.05)
+        for (double y = -1.0; y <= 1.0 + 1e-9; y += 0.05)
+            c.points.push_back(mkpt(x, y, floor_z));
+    for (int i = 0; i < 4000; ++i) {          // 干扰面点数远多于格数 → 内点更多
+        const double x = 0.6 + 2.4 * ((i % 200) / 200.0);
+        const double y = -1.0 + 2.0 * ((i / 200) % 20) / 20.0;
+        c.points.push_back(mkpt(x, y, floor_z + 0.20 * x));   // 斜率 0.2 → 11.3°
+    }
+    return c;
+}
+
+static void test_cell_min_fit_finds_floor_under_tilted_contamination() {
+    GroundSegParams p;                        // prior_z=-0.18 default; 这里把先验对准地板
+    p.ground_prior_z = -0.60;
+    p.prior_window = 0.10;
+    const PointCloud c = make_floor_with_contamination(-0.60);
+
+    GroundPlane plane;
+    CHECK(fit_ground_plane_cells(c, p, plane) == true);       // 必须找到 (确定性)
+    const double tilt = std::acos(std::min(1.0, std::max(-1.0, plane.nz))) / 0.01745329251994329576;
+    CHECK(tilt < 3.0);                                        // 是**平地板**, 不是 11° 干扰面
+    CHECK(std::abs(plane.height_at_origin() - (-0.60)) < 0.02);
+
+    // 接进 segment_ground: 地板点应被判为地面 (多数), 干扰面点判障碍
+    GroundSegParams p2 = p;
+    p2.use_cell_min_fit = true;
+    GroundSegResult seg;
+    segment_ground(c, p2, seg);
+    CHECK(seg.plane.valid == true);
+    const double tilt2 = std::acos(std::min(1.0, std::max(-1.0, seg.plane.nz))) / 0.01745329251994329576;
+    CHECK(tilt2 < 3.0);
+    // 地板 49×41 = 2009 个点应全部判为地面 (零噪声, |s|=0 ≤ eps); 干扰面点 (s≥0.12) 判障碍
+    CHECK(seg.ground_indices.size() >= 1900);
+    CHECK(seg.obstacle_indices.size() >= 3900);
+}
+
+static void test_cell_min_fit_falls_back_when_too_few_cells() {
+    GroundSegParams p;
+    p.ground_prior_z = -0.60;
+    PointCloud c;
+    for (int i = 0; i < 10; ++i) c.points.push_back(mkpt(1.0 + 0.01 * i, 0.0, -0.60));
+    GroundPlane plane;
+    CHECK(fit_ground_plane_cells(c, p, plane) == false);      // 样本不足 → 交回 RANSAC
+}
+
+static void test_cell_min_fit_enforces_tilt_and_prior() {
+    GroundPlane plane;
+    // ① 陡坡 (30°) 作为最低表面 → 倾角超限, 必须拒绝
+    {
+        GroundSegParams p;
+        p.ground_prior_z = -0.60;
+        p.prior_window = 1.0;
+        PointCloud c;
+        for (double x = 0.6; x <= 3.0; x += 0.05)
+            for (double y = -0.5; y <= 0.5; y += 0.1)
+                c.points.push_back(mkpt(x, y, -0.60 + 0.577 * (x - 0.6)));   // tan30°
+        CHECK(fit_ground_plane_cells(c, p, plane) == false);
+    }
+    // ② 高度先验不合格 (地板 -0.90, 先验 -0.60 ± 0.10) → 拒绝
+    {
+        GroundSegParams p;
+        p.ground_prior_z = -0.60;
+        p.prior_window = 0.10;
+        PointCloud c;
+        for (double x = 0.6; x <= 3.0; x += 0.05)
+            for (double y = -0.5; y <= 0.5; y += 0.1)
+                c.points.push_back(mkpt(x, y, -0.90));
+        CHECK(fit_ground_plane_cells(c, p, plane) == false);
+    }
+}
+
 int main() {
+    test_cell_min_fit_finds_floor_under_tilted_contamination();   // v2.7
+    test_cell_min_fit_falls_back_when_too_few_cells();            // v2.7
+    test_cell_min_fit_enforces_tilt_and_prior();                  // v2.7
     std::cout << "=== ground segmentation tests ===" << std::endl;
     test_baseline_flat_ground();
     test_pit_detected();
