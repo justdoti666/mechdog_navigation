@@ -94,7 +94,9 @@ bool fit_ground_plane_cells(const PointCloud& cloud, const GroundSegParams& p,
         auto it = lowest.find(key);
         if (it == lowest.end() || q.z < it->second) it = lowest.emplace(key, q.z).first, it->second = q.z;
     }
-    if (lowest.size() < 30) return false;   // 样本不足 → 交给 RANSAC
+    if (lowest.size() < 12) return false;   // 样本不足 → 交给 RANSAC
+                                            // (阈值取 12: 台架相机 0.6m 高近水平看时地板只占
+                                            //  0.2~0.5 m² ≈ 20 格; 装机 0.2m 俯视会大得多)
 
     std::vector<std::array<double, 3>> q;
     q.reserve(lowest.size());
@@ -114,16 +116,29 @@ bool fit_ground_plane_cells(const PointCloud& cloud, const GroundSegParams& p,
     //    第一轮放宽是为了让倾斜地面也能被整片收进来 (水平种子对 13° 地面会先丢远处),
     //    第二轮起平面已经贴近真实地面, 后续轮次只做精修与离群剔除。
     const double pass_thr[4] = {0.40, 0.20, 0.10, 0.04};
+    const double seed_z = c;                 // 25 百分位种子高度 (地面附近)
     std::vector<std::array<double, 3>> keep;
     for (int pass = 0; pass < 4; ++pass) {
         keep.clear();
         for (const auto& pt : q) {
+            // ★ 地面是**最低面**: 第一轮额外限制"不高于种子 + 0.15m", 防止桌面/房间被收进来
+            //   后把最小二乘拽向陡面 (实测: 不设此约束时收敛到 tilt 39°, h0 为正)。
+            if (pass == 0 && pt[2] > seed_z + 0.15) continue;
             const double r = pt[2] - (a * pt[0] + b * pt[1] + c);
             if (std::abs(r) <= pass_thr[pass]) keep.push_back(pt);
         }
-        if (keep.size() < 30) return false;
+        if (keep.size() < 12) return false;
         q = keep;
         if (!lsq_plane_zy(q, a, b, c)) return false;
+    }
+    // 残差守门: 小幅面也允许, 但拟合必须真的"平" (防 12 格噪声被拟合成歪面)
+    {
+        double ss = 0.0;
+        for (const auto& pt : q) {
+            const double r = pt[2] - (a * pt[0] + b * pt[1] + c);
+            ss += r * r;
+        }
+        if (std::sqrt(ss / static_cast<double>(q.size())) > 0.05) return false;
     }
 
     // ③ 归一化 + 约束校验 (与 RANSAC 同一套先验, 口径一致)
