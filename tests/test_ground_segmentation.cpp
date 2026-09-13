@@ -469,11 +469,35 @@ static void test_cell_min_fit_yawed_floor() {
     CHECK(std::abs(plane.height_at_origin() - (-0.60)) < 0.02);
 }
 
+// v2.7: **单边下包络** —— 地面是"最低的那层大面"。
+//   造: 地板(-0.60, 稀疏) + 桌面(-0.42, 仍在高度带内, 点更多) ⇒ 必须仍拟合到**地板**
+//   (对称带/质心法会被拽到 -0.45 附近)。
+static void test_cell_min_fit_lower_envelope_beats_dense_upper_surface() {
+    GroundSegParams p;
+    p.ground_prior_z = -0.60;
+    p.prior_window   = 0.25;                 // 高度带 z∈[-1.45,-0.35] ⇒ 桌面(-0.42)在带内
+    PointCloud c;
+    for (double x = 0.6; x <= 3.0; x += 0.10)         // 地板: 粗网格 (稀疏)
+        for (double y = -1.0; y <= 1.0; y += 0.10)
+            c.points.push_back(mkpt(x, y, -0.60));
+    for (double x = 0.7; x <= 2.5; x += 0.05)         // 桌面: 细网格 (点更多) + 高 0.18m
+        for (double y = -0.6; y <= 0.6; y += 0.05)
+            c.points.push_back(mkpt(x, y, -0.42));
+    GroundPlane plane;
+    CHECK(fit_ground_plane_cells(c, p, plane) == true);
+    if (plane.valid) {
+        const double tilt = std::acos(std::min(1.0, std::max(-1.0, plane.nz))) / 0.01745329251994329576;
+        CHECK(tilt < 2.0);
+        CHECK(std::abs(plane.height_at_origin() - (-0.60)) < 0.05);   // 在地板上, 不是 -0.45
+    }
+}
+
 int main() {
     test_cell_min_fit_finds_floor_under_tilted_contamination();   // v2.7
     test_cell_min_fit_falls_back_when_too_few_cells();            // v2.7
     test_cell_min_fit_enforces_tilt_and_prior();                  // v2.7
     test_cell_min_fit_yawed_floor();                              // v2.7: 偏航位形
+    test_cell_min_fit_lower_envelope_beats_dense_upper_surface();  // v2.7: 单边下包络
     std::cout << "=== ground segmentation tests ===" << std::endl;
     test_baseline_flat_ground();
     test_pit_detected();

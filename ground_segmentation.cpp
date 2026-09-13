@@ -104,28 +104,39 @@ bool fit_ground_plane_cells(const PointCloud& cloud, const GroundSegParams& p,
         q.push_back({(key.first + 0.5) * cs, (key.second + 0.5) * cs, z});
     }
 
-    // ② 稳健播种: 取格最小值的 **25 百分位**作高度种子 (地面是最低面) + 先假设水平 (a=b=0)。
-    //    不用普通 LSQ 当种子 —— 它会被桌面/物体格拉偏, 直接收敛到错面 (实测踩过)。
-    std::vector<double> zs;
-    zs.reserve(q.size());
-    for (const auto& pt : q) zs.push_back(pt[2]);
-    std::sort(zs.begin(), zs.end());
-    double a = 0.0, b = 0.0, c = zs[zs.size() / 4];
+    // ② 稳健播种: 先用**最低 25% 的格**做最小二乘, 得到**自带倾角**的种子平面。
+    //    (只用"水平面 + 低分位高度"当种子, 对倾斜地面 (台架实测 ~13°) 会因单边 up 上限
+    //     把地板自己削掉 → keep<12 早退; 用低分位子集拟合则种子自带倾角。)
+    std::vector<std::array<double, 3>> q_sorted = q;
+    std::sort(q_sorted.begin(), q_sorted.end(),
+              [](const std::array<double, 3>& x, const std::array<double, 3>& y) { return x[2] < y[2]; });
+    const size_t n_seed = std::max<size_t>(6, q_sorted.size() / 4);
+    std::vector<std::array<double, 3>> seed_pts(q_sorted.begin(), q_sorted.begin() + n_seed);
+    double a = 0.0, b = 0.0, c = 0.0;
+    if (!lsq_plane_zy(seed_pts, a, b, c)) {
+        std::vector<double> zs;
+        zs.reserve(q.size());
+        for (const auto& pt : q) zs.push_back(pt[2]);
+        std::sort(zs.begin(), zs.end());
+        a = 0.0; b = 0.0; c = zs[zs.size() / 4];
+    }
 
     // ③ 逐级收敛 (0.40 → 0.20 → 0.10 → 0.04 m): 每轮"保留带内格 → 重拟合"。
     //    第一轮放宽是为了让倾斜地面也能被整片收进来 (水平种子对 13° 地面会先丢远处),
     //    第二轮起平面已经贴近真实地面, 后续轮次只做精修与离群剔除。
-    const double pass_thr[4] = {0.40, 0.20, 0.10, 0.04};
-    const double seed_z = c;                 // 25 百分位种子高度 (地面附近)
+    // 逐级收敛 —— **单边下包络 (lower envelope)**:
+    //    地面是"最低的那层大面" ⇒ 格的残差 r = z − plane(x,y) **允许为负** (坑/台阶/更低地面),
+    //    **不允许明显为正** (高出来的就是障碍/桌面) 。这条从物理上杜绝"拟合漂到高处桌面"
+    //    (实测漂到 tilt 39~53°、h0 为正, 只能靠校验兜住)。每轮同时收紧上下界 ⇒ 每轮都在
+    //    当轮平面上**重新锚定最低面**, 而不是一路跟着初始种子走。
+    struct Band { double up, down; };
+    const Band band[4] = {{0.12, 0.50}, {0.08, 0.25}, {0.05, 0.15}, {0.03, 0.08}};
     std::vector<std::array<double, 3>> keep;
     for (int pass = 0; pass < 4; ++pass) {
         keep.clear();
         for (const auto& pt : q) {
-            // ★ 地面是**最低面**: 第一轮额外限制"不高于种子 + 0.15m", 防止桌面/房间被收进来
-            //   后把最小二乘拽向陡面 (实测: 不设此约束时收敛到 tilt 39°, h0 为正)。
-            if (pass == 0 && pt[2] > seed_z + 0.15) continue;
             const double r = pt[2] - (a * pt[0] + b * pt[1] + c);
-            if (std::abs(r) <= pass_thr[pass]) keep.push_back(pt);
+            if (r <= band[pass].up && r >= -band[pass].down) keep.push_back(pt);
         }
         if (keep.size() < 12) return false;
         q = keep;
