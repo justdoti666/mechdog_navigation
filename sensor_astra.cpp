@@ -435,4 +435,59 @@ EnvironmentType AstraProDriver::classify_environment(double light_level) {
     return EnvironmentType::OUTDOOR;
 }
 
+// ------------------------------------------------------------
+// 外部注入深度帧 (无 Astra SDK 场景: ROS 话题 / 离线回放)
+// 组装口径与 capture_real 完全一致: 深度值域过滤 (MIN/MAX_VALID_DISTANCE_MM) →
+// 区域分析 → 环境判定。区别只在于数据来自外部缓冲区而不是 SDK。
+// ⚠ 定义必须放在 `#ifdef USE_ASTRA_SDK` 之外 —— 它的目标平台 (Pi 5B) 恰恰是
+//   没有 SDK 的那一侧; 放进 ifdef 里会在未编译 SDK 时变成"未定义符号"(LNK2019)。
+// 注意: 本函数不由采集线程调用; 调用方须不 start() (否则注入帧被模拟/真机帧覆盖)。
+// ------------------------------------------------------------
+bool AstraProDriver::inject_depth_frame(const std::vector<uint16_t>& depth_map,
+                                        int width, int height, double stamp_s) {
+    if (width <= 0 || height <= 0) return false;
+    const size_t need = static_cast<size_t>(width) * static_cast<size_t>(height);
+    if (depth_map.size() < need) return false;
+
+    AstraFrame frame;
+    frame.timestamp = (stamp_s >= 0.0)
+        ? stamp_s
+        : std::chrono::duration<double>(
+              std::chrono::system_clock::now().time_since_epoch()).count();
+    frame.depth_width  = width;
+    frame.depth_height = height;
+
+    // 值域过滤 (与 capture_real 同口径: 0 = 无效)
+    frame.depth_map.resize(need);
+    for (size_t i = 0; i < need; ++i) {
+        const uint16_t v = depth_map[i];
+        frame.depth_map[i] = (v >= static_cast<uint16_t>(MIN_VALID_DISTANCE_MM) &&
+                              v <= static_cast<uint16_t>(MAX_VALID_DISTANCE_MM)) ? v : 0;
+    }
+
+    frame.center_region = analyze_region(frame.depth_map, width, height, "center");
+    frame.left_region   = analyze_region(frame.depth_map, width, height, "left");
+    frame.right_region  = analyze_region(frame.depth_map, width, height, "right");
+    frame.environment   = classify_environment(
+        estimate_ambient_light(frame.depth_map, width, height));
+    frame.valid     = true;                    // H1 口径: 无有效像素时融合层按 ratio==0 判无效
+    frame.frame_seq = ++frame_seq_counter_;
+
+    {
+        std::lock_guard<std::mutex> guard(lock_);
+        latest_frame_ = std::move(frame);
+    }
+    return true;
+}
+
+void AstraProDriver::invalidate_frame() {
+    AstraFrame frame;
+    frame.timestamp = std::chrono::duration<double>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    frame.valid     = false;   // 深度链路退出融合 (fail-closed)
+    frame.frame_seq = ++frame_seq_counter_;
+    std::lock_guard<std::mutex> guard(lock_);
+    latest_frame_ = std::move(frame);
+}
+
 } // namespace mechdog

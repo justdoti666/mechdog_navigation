@@ -121,6 +121,29 @@ public:
     /** 获取最新彩色帧 (RGB888) + 中央距离/最近障碍, 用于可视化 (真机模式有效) */
     ColorFrameData get_color_frame();
 
+    /**
+     * 外部注入深度帧 (无 Astra SDK 场景: ROS 话题 / 离线回放)。
+     * 与 UltrasonicArrayDriver::inject_external_data 同思路: 注入后立即生效于
+     * get_latest_frame(), 区域分析 (analyze_region) 与环境判定
+     * (estimate_ambient_light → classify_environment) 走与真机 capture_real 相同的链路。
+     *
+     * 用法: 订阅深度话题 → 转 uint16(mm, 行主序) → 调用本函数;
+     *       ⚠ **不要**同时调用 start() —— 采集线程会覆盖注入帧 (topic 源应由话题驱动)。
+     *
+     * @param depth_map uint16 深度(mm), 0 = 无效; 长度须 >= width*height
+     * @param stamp_s   采集时刻(秒); < 0 = 取当前系统时间
+     * @return true = 已接受并更新最新帧; false = 尺寸/长度非法 (原帧保持不动)
+     */
+    bool inject_depth_frame(const std::vector<uint16_t>& depth_map, int width, int height,
+                            double stamp_s = -1.0);
+
+    /**
+     * 标记当前帧失效 (话题超时 / 深度源断开)。
+     * 深度链路随即退出融合 (fail-closed): fuse() 的 all_sensors_invalid 会看到
+     * astra 无有效像素; 超声波链路不受影响 (仍按超声决策)。
+     */
+    void invalidate_frame();
+
     /** 是否真机模式 (非模拟) */
     bool is_real() const { return !use_simulated_; }
 
