@@ -201,6 +201,10 @@ struct IrConfig {
 // 实现见 ground_segmentation.h/.cpp.
 struct GroundSegConfig {
     static constexpr double ground_prior_z     = -0.18; // 装机高度先验 (与 CameraExtrinsics::z 联动, 量测后两处同步)
+                                                        // ⚠ v2.6: 这是**装机值**(相机离地 18cm)。台架/手持相机架高
+                                                        //   0.6m 时必须改用参数 camera_height_m(见 ROS 侧
+                                                        //   sensor_geometry.hpp + safety_node 的 cloud_*/camera_height_m),
+                                                        //   否则真地面落在先验窗之外 → 2.5D 覆盖/通行性全部无意义。
     static constexpr double prior_window       = 0.10;  // 平面高度接受半带宽 (手持实验可放宽到 ~1.0)
     static constexpr double plane_max_tilt_deg = 15.0;  // 法向偏离竖直的容限 (更陡按障碍处理, 保守)
     // ⚠ 与 HeightMap25Config::slope_max (默认 20°, 见 heightmap_2d5.h) 联动:
