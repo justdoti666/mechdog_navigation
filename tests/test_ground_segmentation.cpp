@@ -450,10 +450,30 @@ static void test_cell_min_fit_enforces_tilt_and_prior() {
     }
 }
 
+// v2.7: **偏航位形** —— 相机除俯仰外还可能偏航 (实测台架 base 系 y∈[-4.58,-0.60])。
+//   新路径不得依赖 base 系的 x/y 足迹 (盒/锥), 只按高度先验带过滤 ⇒ 转多少度都该找到地板。
+static void test_cell_min_fit_yawed_floor() {
+    GroundSegParams p;
+    p.ground_prior_z = -0.60;
+    p.prior_window = 0.10;
+    const double yaw = 20.0 * 0.01745329251994329576;
+    const double cy = std::cos(yaw), sy = std::sin(yaw);
+    PointCloud c;
+    for (double x = 0.6; x <= 3.0 + 1e-9; x += 0.05)
+        for (double y = -1.5; y <= 1.5 + 1e-9; y += 0.05)
+            c.points.push_back(mkpt(cy * x - sy * y, sy * x + cy * y, -0.60));  // 地板绕 z 转 20°
+    GroundPlane plane;
+    CHECK(fit_ground_plane_cells(c, p, plane) == true);
+    const double tilt = std::acos(std::min(1.0, std::max(-1.0, plane.nz))) / 0.01745329251994329576;
+    CHECK(tilt < 1.5);                                   // 水平地板转多少度仍是水平
+    CHECK(std::abs(plane.height_at_origin() - (-0.60)) < 0.02);
+}
+
 int main() {
     test_cell_min_fit_finds_floor_under_tilted_contamination();   // v2.7
     test_cell_min_fit_falls_back_when_too_few_cells();            // v2.7
     test_cell_min_fit_enforces_tilt_and_prior();                  // v2.7
+    test_cell_min_fit_yawed_floor();                              // v2.7: 偏航位形
     std::cout << "=== ground segmentation tests ===" << std::endl;
     test_baseline_flat_ground();
     test_pit_detected();

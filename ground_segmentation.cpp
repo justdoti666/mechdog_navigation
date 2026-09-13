@@ -78,27 +78,23 @@ bool fit_ground_plane_cells(const PointCloud& cloud, const GroundSegParams& p,
     out = GroundPlane{};
     const double cs = (p.cell_size > 0.01) ? p.cell_size : 0.01;
 
-    // ① 每个 (x,y) 小格取最低 z (地板; 桌上物体/椅子腿都在其上)
-    //    ★ 只统计"近场 + 高度在先验带附近"的格: 不加限制时桌面/墙/远处地面会把最小二乘拉偏。
-    //    注意用 **盒子** 而不是对称视锥 —— 实测台架相机除了俯仰还**偏航**(base 系 y 全负、跨 4m),
-    //    "|y| ≤ 0.56x" 这类对称锥会把点全滤掉 (踩过)。
-    const double y_half = 1.5;                         // 横向半宽 (近场地面; 与标定工具口径一致)
-    const double x_lo = std::max(0.2, p.neg_near_m - 0.4);
-    const double x_hi = p.neg_far_m + 0.5;
-    const double z_lo = p.ground_prior_z - p.prior_window - 0.6;   // 容忍更深 (坑底)
+    // ① 只按**高度先验带**过滤 —— 不假设任何 x/y 足迹 (盒/锥)。
+    //    理由 (真机实测 2026-09-13): 台架相机除俯仰外还明显**偏航** (base 系 y∈[-4.58,-0.60]),
+    //    任何"近场 x/y 盒"都会把地板整片漏掉 (逐级过滤最后一步 过高度带=0)。
+    //    地面在物理上就是"某个高度上的最低大面", 与它落在视野何处无关 ⇒ 只按 z 过滤。
+    //    margin 0.6 容忍比先验更低的面 (坑底/下行台阶)。
+    const double z_lo = p.ground_prior_z - p.prior_window - 0.6;
     const double z_hi = p.ground_prior_z + p.prior_window;
     std::map<std::pair<int, int>, double> lowest;
     for (const auto& q : cloud.points) {
         if (!std::isfinite(q.x) || !std::isfinite(q.y) || !std::isfinite(q.z)) continue;
-        if (q.x < x_lo || q.x > x_hi) continue;
-        if (std::abs(q.y) > y_half) continue;
         if (q.z < z_lo || q.z > z_hi) continue;
         const auto key = std::make_pair(static_cast<int>(std::floor(q.x / cs)),
                                         static_cast<int>(std::floor(q.y / cs)));
         auto it = lowest.find(key);
         if (it == lowest.end() || q.z < it->second) it = lowest.emplace(key, q.z).first, it->second = q.z;
     }
-    if (lowest.size() < 20) return false;   // 样本不足 → 交给 RANSAC
+    if (lowest.size() < 30) return false;   // 样本不足 → 交给 RANSAC
 
     std::vector<std::array<double, 3>> q;
     q.reserve(lowest.size());
@@ -106,20 +102,26 @@ bool fit_ground_plane_cells(const PointCloud& cloud, const GroundSegParams& p,
         q.push_back({(key.first + 0.5) * cs, (key.second + 0.5) * cs, z});
     }
 
-    // ② 三级递减阈值稳健最小二乘 (pass0 宽松 → pass2 收紧):
-    //    初始 LSQ 会被桌面/物体格拉偏, 用紧阈值会一次性把地板格全刷掉 (实测踩过),
-    //    故先用宽松阈值收敛到主表面 (地板), 再逐级收紧剔除残余离群。
-    double a = 0, b = 0, c = 0;
-    if (!lsq_plane_zy(q, a, b, c)) return false;
-    const double pass_thr[3] = {0.20, 0.08, 0.03};
+    // ② 稳健播种: 取格最小值的 **25 百分位**作高度种子 (地面是最低面) + 先假设水平 (a=b=0)。
+    //    不用普通 LSQ 当种子 —— 它会被桌面/物体格拉偏, 直接收敛到错面 (实测踩过)。
+    std::vector<double> zs;
+    zs.reserve(q.size());
+    for (const auto& pt : q) zs.push_back(pt[2]);
+    std::sort(zs.begin(), zs.end());
+    double a = 0.0, b = 0.0, c = zs[zs.size() / 4];
+
+    // ③ 逐级收敛 (0.40 → 0.20 → 0.10 → 0.04 m): 每轮"保留带内格 → 重拟合"。
+    //    第一轮放宽是为了让倾斜地面也能被整片收进来 (水平种子对 13° 地面会先丢远处),
+    //    第二轮起平面已经贴近真实地面, 后续轮次只做精修与离群剔除。
+    const double pass_thr[4] = {0.40, 0.20, 0.10, 0.04};
     std::vector<std::array<double, 3>> keep;
-    for (int pass = 0; pass < 3; ++pass) {
+    for (int pass = 0; pass < 4; ++pass) {
         keep.clear();
         for (const auto& pt : q) {
             const double r = pt[2] - (a * pt[0] + b * pt[1] + c);
             if (std::abs(r) <= pass_thr[pass]) keep.push_back(pt);
         }
-        if (keep.size() < 20) return false;
+        if (keep.size() < 30) return false;
         q = keep;
         if (!lsq_plane_zy(q, a, b, c)) return false;
     }
