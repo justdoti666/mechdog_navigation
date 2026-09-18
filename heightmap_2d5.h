@@ -70,6 +70,14 @@ struct HeightMap25Config {
 
     // 与 P1 一致的地面分类阈值
     double plane_eps_m = GroundSegConfig::point_on_plane_eps; // 0.02 视为地面
+
+    // v2.8 视场楔形 (IMPL_PLAN_GRID_WEDGE_2026-09-18.md)
+    //   动机: 0.18m 高相机水平半视场 ≈ ±29°(tan≈0.561), 而网格铺到 y±2.5m
+    //         ⇒ 实机 4848 格里只有 65 格有数据, 其余"未知"纯属网格超出视场。
+    //   默认 false ⇒ 判据/计数与历史完全一致 (零风险); 打开后额外按 in-FOV 口径统计。
+    bool   wedge_only     = false;
+    double wedge_y_slope  = 0.561;   // ≈ tan(水平半视场): 320px / fx570.34
+    double wedge_margin_m = 0.15;    // 近场/装配余量 (yaw 未标定时避免切掉真实视野)
 };
 
 /** 2.5D 栅格结果 */
@@ -85,6 +93,14 @@ struct HeightMap25Result {
     // 统计 (诊断输出)
     int count_unknown = 0, count_traversable = 0,
         count_up = 0, count_down = 0, count_steep = 0;
+
+    // v2.8 in-FOV 口径 (wedge_only=false 时 count_in_fov == cols*rows)
+    int    count_in_fov = 0;       // 视场楔形内的格数
+    int    count_fov_unknown = 0;  // 其中仍未知的格
+    double wedge_y_slope = 0.561;  // 从 cfg 复制, 供 in_fov() 使用
+    double wedge_margin_m = 0.15;
+    bool   in_fov(int col, int row) const;   // 该格是否在视场内 (可单测)
+    double fov_coverage() const;             // (in_fov - fov_unknown) / in_fov
 
     // 世界(base 系) ↔ 栅格索引
     bool world_to_index(double wx, double wy, int& col, int& row) const;

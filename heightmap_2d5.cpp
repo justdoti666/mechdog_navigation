@@ -23,12 +23,27 @@ void HeightMap25Result::index_to_world(int col, int row,
     wy = -y_half_m + (row + 0.5) * cell_size;
 }
 
+bool HeightMap25Result::in_fov(int col, int row) const {
+    if (col < 0 || col >= cols || row < 0 || row >= rows) return false;
+    double wx = 0.0, wy = 0.0;
+    index_to_world(col, row, wx, wy);
+    return std::abs(wy) <= wedge_y_slope * wx + wedge_margin_m;
+}
+
+double HeightMap25Result::fov_coverage() const {
+    if (count_in_fov <= 0) return 0.0;
+    return static_cast<double>(count_in_fov - count_fov_unknown) /
+           static_cast<double>(count_in_fov);
+}
+
 std::string HeightMap25Result::stats() const {
     char buf[256];
     std::snprintf(buf, sizeof(buf),
-        "hm25 %dx%d res=%.2fm  x[%.1f,%.1f]  unknown=%d traversable=%d up=%d down=%d steep=%d",
+        "hm25 %dx%d res=%.2fm  x[%.1f,%.1f]  unknown=%d traversable=%d up=%d down=%d steep=%d"
+        "  in_fov=%d/%d cov=%.0f%%",
         cols, rows, cell_size, min_x_m, min_x_m + cols * cell_size,
-        count_unknown, count_traversable, count_up, count_down, count_steep);
+        count_unknown, count_traversable, count_up, count_down, count_steep,
+        count_in_fov, cols * rows, fov_coverage() * 100.0);
     return std::string(buf);
 }
 
@@ -45,6 +60,8 @@ void build_heightmap_25(const PointCloud& cloud, const GroundSegResult& seg,
     out.cell_size = cfg.cell_size;
     out.min_x_m = cfg.min_x_m;
     out.y_half_m = cfg.y_half_m;
+    out.wedge_y_slope  = cfg.wedge_y_slope;   // v2.8
+    out.wedge_margin_m = cfg.wedge_margin_m;
     out.height.assign(static_cast<size_t>(out.cols) * out.rows,
                       std::numeric_limits<float>::quiet_NaN());
     out.flag.assign(static_cast<size_t>(out.cols) * out.rows, CellFlag::Unknown);
@@ -85,9 +102,15 @@ void build_heightmap_25(const PointCloud& cloud, const GroundSegResult& seg,
             const size_t idx = static_cast<size_t>(r) * out.cols + c;
             const CellRaw& cell = raw[idx];
 
+            // v2.8: 视场楔形统计 (只统计, 不改判据; legacy 时全格计入 ⇒ 与历史一致)
+            const bool cell_in_fov = !cfg.wedge_only ||
+                std::abs(wy) <= cfg.wedge_y_slope * wx + cfg.wedge_margin_m;
+            if (cell_in_fov) ++out.count_in_fov;
+
             if (!cell.has_any) {
                 out.flag[idx] = CellFlag::Unknown;
                 ++out.count_unknown;
+                if (cell_in_fov) ++out.count_fov_unknown;
                 continue;
             }
 

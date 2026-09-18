@@ -168,10 +168,78 @@ static void test_too_steep() {
     }
 }
 
+
+// ============================================================
+// v2.8: 视场楔形 (IMPL_PLAN_GRID_WEDGE) —— TDD 红→绿
+//   问题: 网格 4848 格中实测只有 65 格有数据, 其余"未知"来自"网格远超视场"。
+//   方案: 只在视场楔形内统计/判可通行; 覆盖率口径改 in-FOV; 默认关闭=历史行为不变。
+// ============================================================
+static HeightMap25Result run_wedge(const PointCloud& c, bool wedge) {
+    GroundSegParams g; g.prior_window = 0.10;
+    GroundSegResult seg;
+    segment_ground(c, g, seg);
+    HeightMap25Config cfg;          // 默认 0.6~3.0m, y±2.5m, 5cm
+    cfg.wedge_only = wedge;
+    HeightMap25Result hm;
+    build_heightmap_25(c, seg, cfg, hm);
+    return hm;
+}
+
+// T7 楔形: 只统计视场内的格; 覆盖率、格归属都可测
+static void test_wedge_in_fov_and_coverage() {
+    PointCloud c;
+    // 注意: 点距必须 < 格距(0.05), 否则"点距=格距"会被浮点除法切成空格 ⇒ 假未知(踩过)
+    add_ground_patch(c, 0.6, 3.0, -2.4, 2.4, 0.025, [](double, double) { return -0.18; });
+    HeightMap25Result on = run_wedge(c, true);
+    CHECK(on.valid);
+    CHECK(on.count_in_fov > 0);
+    CHECK(on.count_in_fov < on.cols * on.rows);          // 楔形确实排除了格
+    std::cout << "  [in-FOV 诊断] 格=" << on.cols * on.rows
+              << " in_fov=" << on.count_in_fov
+              << " fov_unknown=" << on.count_fov_unknown
+              << " cov=" << on.fov_coverage()
+              << " unknown(全体)=" << on.count_unknown
+              << " trav=" << on.count_traversable
+              << " up=" << on.count_up << " down=" << on.count_down << std::endl;
+    // 定位未知格分布 (排查: 均匀地板不应有未知格)
+    double ux0 = 1e9, ux1 = -1e9, uy0 = 1e9, uy1 = -1e9; int ucnt = 0;
+    for (int rr = 0; rr < on.rows; ++rr)
+        for (int cc = 0; cc < on.cols; ++cc)
+            if (on.in_fov(cc, rr) && on.flag[rr * on.cols + cc] == CellFlag::Unknown) {
+                double wx = 0, wy = 0; on.index_to_world(cc, rr, wx, wy); ++ucnt;
+                if (wx < ux0) ux0 = wx; if (wx > ux1) ux1 = wx;
+                if (wy < uy0) uy0 = wy; if (wy > uy1) uy1 = wy;
+            }
+    std::cout << "  [未知格分布] n=" << ucnt << "  x[" << ux0 << "," << ux1
+              << "]  y[" << uy0 << "," << uy1 << "]" << std::endl;
+    CHECK(on.fov_coverage() > 0.95);                     // 楔形内几乎全被地面覆盖
+    // 逐格归属: |y| <= 0.561*x + 0.15
+    int c1 = 0, r1 = 0;
+    CHECK(on.world_to_index(1.0, 0.40, c1, r1) && on.in_fov(c1, r1));    // 0.40 <= 0.711 ✓
+    CHECK(on.world_to_index(1.0, 0.90, c1, r1) && !on.in_fov(c1, r1));   // 0.90 > 0.711 ✗
+    CHECK(on.world_to_index(2.0, 1.20, c1, r1) && on.in_fov(c1, r1));    // 1.20 <= 1.272 ✓
+    CHECK(on.world_to_index(2.0, 1.50, c1, r1) && !on.in_fov(c1, r1));   // 1.50 > 1.272 ✗
+}
+
+// T8 legacy 默认: 完全等价历史 (全格统计), 且计数自洽不变
+static void test_wedge_legacy_equivalence() {
+    PointCloud c;
+    add_ground_patch(c, 0.6, 3.0, -2.4, 2.4, 0.025, [](double, double) { return -0.18; });
+    HeightMap25Result off = run_wedge(c, false);
+    CHECK(off.valid);
+    CHECK(off.count_in_fov == off.cols * off.rows);      // legacy: 不排除任何格
+    CHECK(off.count_unknown + off.count_traversable + off.count_up +
+          off.count_down + off.count_steep == off.cols * off.rows);
+    // 与历史一致: 未知格 = in_fov 内未知格 (legacy 下二者相同)
+    CHECK(off.count_fov_unknown == off.count_unknown);
+}
+
 int main() {
     std::cout << "=== heightmap 2.5d tests ===" << std::endl;
     test_flat(); test_step_up(); test_cliff_down(); test_wall_only(); test_degenerate();
     test_too_steep();
+    test_wedge_in_fov_and_coverage();   // v2.8
+    test_wedge_legacy_equivalence();    // v2.8
     std::cout << "=== " << g_checks << " checks, " << g_fail << " failed ===" << std::endl;
     return g_fail == 0 ? 0 : 1;
 }
