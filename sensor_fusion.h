@@ -120,8 +120,25 @@ private:
     // v2.5: 超声链路开关 (false = 不读超声/不作悬崖判定; 上层在无硬件或无数据源时置 false)
     bool   ultrasonic_enabled_ = true;
     double terrain_x_         = 0.0;   // 最近命中处 x (诊断)
+    // ---- v2.9 路1 细分 (按标签分级) ----
+    // 证据: 实机 181 帧 STOP 124 / FORWARD 57 ⇒ "近场凸起一律 STOP" 被证伪 (见 config.h
+    // TerrainAvoidConfig::bump_* 的说明)。分级口径:
+    //   CliffDown / TooSteep (坑、过陡)      -> STOP            (任何距离)
+    //   ObstacleUp (凸起) + 贴身 + 正中      -> STOP            (确认过不去)
+    //   ObstacleUp 偏一侧                    -> 转向对侧让开
+    //   ObstacleUp 正中但未贴身 / 仅中距命中 -> 至少降速
+    bool   terrain_near_cliff_ = false; // 近场命中"坑/过陡" (STOP 级)
+    bool   terrain_near_bump_  = false; // 近场命中"凸起" (降速/让开级)
+    double terrain_near_y_     = 0.0;   // 近场凸起命中处平均 y (>0 偏左, <0 偏右)
+    double terrain_near_bump_x_ = 0.0;  // 近场凸起最近命中 x (m)
     double terrain_mid_side_  = 0.0;   // 中距命中的平均 y (>0 偏左, <0 偏右)
     int    terrain_mid_count_ = 0;     // 中距命中数
+
+    // v2.9 路1 细分策略 (纯函数 ⇒ 可单测)。语义:
+    //   返回 FORWARD       = "路1 不表态", 调用方应继续走后面的距离阶梯
+    //   返回其它动作        = 路1 直接裁定 (STOP / SLOW_FORWARD / TURN_*)
+    static NavigationAction terrain_action(bool near_any, bool near_cliff, bool near_bump,
+                                           double bump_y_m, double bump_x_m, bool mid);
 
     static constexpr double kCmToM = 0.01;
 

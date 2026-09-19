@@ -769,13 +769,33 @@ static void test_terrain_near_block_stops() {
     CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
           == NavigationAction::STOP);
 
-    // 台阶 (ObstacleUp) / 过陡 (TooSteep) 同样 STOP
-    fusion.set_local_terrain(make_hm25_cell(0.8, 0.0, CellFlag::ObstacleUp), no_neg);
-    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
-          == NavigationAction::STOP);
+    // 过陡 (TooSteep) 与坑同类 → 仍 STOP
     fusion.set_local_terrain(make_hm25_cell(0.8, 0.0, CellFlag::TooSteep), no_neg);
     CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
           == NavigationAction::STOP);
+
+    // ---- v2.9 路1 细分: 凸起(ObstacleUp)不再一律 STOP ----
+    // 证据: 实机 181 帧 STOP 124 / FORWARD 57 ⇒ 旧口径"近场任意标签都停"过保守。
+    // 0.8m 正中凸起: 未贴身(>bump_stop_x 0.70) ⇒ 降速靠近, 不停车
+    fusion.set_local_terrain(make_hm25_cell(0.8, 0.0, CellFlag::ObstacleUp), no_neg);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::SLOW_FORWARD);
+    // 0.6m 正中凸起: 贴身(<=0.70) + 正中(|y|<=0.18) ⇒ STOP
+    fusion.set_local_terrain(make_hm25_cell(0.6, 0.0, CellFlag::ObstacleUp), no_neg);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::STOP);
+    // 偏左凸起 (y=+0.25: 在走廊半宽 0.30 内, 且超出正中阈值 0.18) ⇒ 向右让开
+    fusion.set_local_terrain(make_hm25_cell(0.65, 0.25, CellFlag::ObstacleUp), no_neg);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::TURN_RIGHT);
+    // 偏右凸起 (y=-0.25) ⇒ 向左让开
+    fusion.set_local_terrain(make_hm25_cell(0.65, -0.25, CellFlag::ObstacleUp), no_neg);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::TURN_LEFT);
+    // 近场凸起 + 前向失明 ⇒ 仍是让开/降速语义 (不被前向失明覆盖)
+    fusion.set_local_terrain(make_hm25_cell(0.65, 0.25, CellFlag::ObstacleUp), no_neg);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, false)
+          == NavigationAction::TURN_RIGHT);
 
     // 近场有坑 + 前向失明 (原行为 SLOW_FORWARD) → 仍 STOP (路1 优先级更高, 但低于悬崖)
     fusion.set_local_terrain(make_hm25_cell(0.8, 0.0, CellFlag::CliffDown), no_neg);

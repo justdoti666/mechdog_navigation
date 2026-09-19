@@ -161,6 +161,17 @@ struct TerrainAvoidConfig {
     static constexpr double mid_x_hi_m        = 2.00; // 中距观察区远界 (m)
     static constexpr double corridor_y_half_m = 0.30; // 走廊半宽 (机身半宽 + 余量)
     static constexpr double mid_side_deadband_m = 0.15; // 中距偏侧死区 (小于此值只降速不转向)
+    // ---- v2.9 路1 细分: 凸起(ObstacleUp)的停/让判据 ----
+    // 背景: 旧口径"近场任意禁行标签 ⇒ STOP"把台阶/小凸起也一律停车。实机 181 帧
+    // 统计 STOP 124 / FORWARD 57 ⇒ 证伪; 且近场 0.4~0.6m 本就在深度盲区内, 停车
+    // 反而堵死唯一可通行方向。新口径:
+    //   凸起"贴身" (x <= bump_stop_x_m) 且"正中" (|y| <= bump_stop_y_half_m) -> STOP
+    //   否则 -> 降速 + 朝对侧让开 (让开方向由命中处平均 y 的符号给出)
+    // 取值依据: 机身半宽 ~0.18m (正中判据取半机宽, 偏出机身即可侧身通过);
+    //           贴身判据 0.70m = 盲区边界 0.6m + 一个机身余量。
+    static constexpr double bump_stop_x_m      = 0.70;
+    static constexpr double bump_stop_y_half_m = 0.18;
+
 };
 
 // ============================================================

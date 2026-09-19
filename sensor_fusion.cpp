@@ -356,8 +356,12 @@ NavigationAction SensorFusion::determine_action(
     // 路1: 近场地形 (P1/P1.5) —— 前方 0.4~1.2m 走廊内有坑/台阶: 立即停车。
     // 优先级: 高于"前向失明降速"(下方) 与 超声/融合距离阶梯 —— 相机看不见不代表
     // 前方没坑; 但**低于**悬崖检测与全失效 (上面两条)。
+    // v2.9 细分: 近场命中按标签分级 (坑/过陡 -> STOP; 凸起 -> 贴身且正中才 STOP, 否则
+    // 降速/朝对侧让开)。**只处理近场**: 中距的让开与紧急距离阶梯保持原位置与优先级
+    // (曾把 terrain_mid_ 一并提到此处 ⇒ 抢走距离阶梯, 被 4 条既有用例抓出回归)。
     if (terrain_near_) {
-        return NavigationAction::STOP;
+        return terrain_action(true, terrain_near_cliff_, terrain_near_bump_,
+                              terrain_near_y_, terrain_near_bump_x_, false);
     }
 
     // R3: 前向 (left/center/right) 全部失效时, min_forward=8.0 兜底不可作"开阔"依据 ——
@@ -466,6 +470,32 @@ void SensorFusion::set_local_terrain(const HeightMap25Result& hm,
         scan_corridor_points(seg.negative_points, near_hi, mid_hi, yh));
 
     terrain_near_      = near_scan.blocked;
+    // v2.9 路1 细分: 近场命中按标签分级 (坑/过陡 vs 凸起)。只用公开 API
+    // (flag + index_to_world), 不改动原 scan_corridor 的语义 (回归安全)。
+    auto scan_near_label = [&](CellFlag want, double& mean_y, double& nearest_x) {
+        int n = 0; double sy = 0.0, nx = 1e9;
+        for (int c = 0; c < hm.cols; ++c)
+            for (int r = 0; r < hm.rows; ++r) {
+                const size_t idx = static_cast<size_t>(r) * static_cast<size_t>(hm.cols) +
+                                   static_cast<size_t>(c);
+                if (idx >= hm.flag.size() || hm.flag[idx] != want) continue;
+                double wx = 0.0, wy = 0.0;
+                hm.index_to_world(c, r, wx, wy);
+                if (wx < near_lo || wx > near_hi || std::abs(wy) > yh) continue;
+                ++n; sy += wy; if (wx < nx) nx = wx;
+            }
+        mean_y    = (n > 0) ? sy / static_cast<double>(n) : 0.0;
+        nearest_x = (n > 0) ? nx : 0.0;
+        return n;
+    };
+    double cy = 0.0, cx = 0.0, sy2 = 0.0, sx2 = 0.0, by = 0.0, bx = 0.0;
+    const int n_cliff = scan_near_label(CellFlag::CliffDown,  cy, cx);
+    const int n_steep = scan_near_label(CellFlag::TooSteep,   sy2, sx2);
+    const int n_bump  = scan_near_label(CellFlag::ObstacleUp, by, bx);
+    terrain_near_cliff_ = (n_cliff + n_steep) > 0;
+    terrain_near_bump_  = n_bump > 0;
+    terrain_near_y_     = by;
+    terrain_near_bump_x_= bx;
     terrain_mid_       = mid_scan.blocked;
     terrain_mid_count_ = mid_scan.count;
     terrain_mid_side_  = mid_scan.mean_y_m;
@@ -473,7 +503,39 @@ void SensorFusion::set_local_terrain(const HeightMap25Result& hm,
                                            : mid_scan.nearest_x_m;
 }
 
+// v2.9 路1 细分策略 (纯函数, 见头文件说明)。证据驱动的分级:
+//   坑/过陡 -> STOP 任何距离; 凸起 -> 贴身且正中才 STOP, 否则降速/朝对侧让开。
+NavigationAction SensorFusion::terrain_action(bool near_any, bool near_cliff, bool near_bump,
+                                             double bump_y_m, double bump_x_m, bool mid) {
+    if (!near_any) {
+        return mid ? NavigationAction::SLOW_FORWARD : NavigationAction::FORWARD;
+    }
+    if (near_cliff) {
+        return NavigationAction::STOP;                    // 坑 / 过陡: 一律停
+    }
+    if (!near_bump) {
+        // 近场命中但**无法分级** —— 例如 P1 负障碍点路径 (hm 无效/无格子标签)。
+        // 无标签不代表无危险 ⇒ 保守按 STOP, 保持接入前"近场命中即停"的行为。
+        return NavigationAction::STOP;
+    }
+    if (near_bump) {
+        const bool centered = std::abs(bump_y_m) <= TerrainAvoidConfig::bump_stop_y_half_m;
+        const bool hug      = (bump_x_m > 0.0) &&
+                              (bump_x_m <= TerrainAvoidConfig::bump_stop_x_m);
+        if (centered && hug) return NavigationAction::STOP;          // 贴身 + 正中: 过不去
+        // 偏一侧 -> 朝对侧让开 (y>0 命中在左 => 向右转)
+        if (bump_y_m >  TerrainAvoidConfig::bump_stop_y_half_m) return NavigationAction::TURN_RIGHT;
+        if (bump_y_m < -TerrainAvoidConfig::bump_stop_y_half_m) return NavigationAction::TURN_LEFT;
+        return NavigationAction::SLOW_FORWARD;                       // 正中但未贴身: 降速靠近
+    }
+    return NavigationAction::SLOW_FORWARD;                           // 其它近场命中: 保守
+}
+
 void SensorFusion::clear_local_terrain() {
+    terrain_near_cliff_= false;   // v2.9
+    terrain_near_bump_ = false;   // v2.9
+    terrain_near_y_    = 0.0;     // v2.9
+    terrain_near_bump_x_ = 0.0;   // v2.9
     terrain_near_      = false;
     terrain_mid_       = false;
     terrain_x_         = 0.0;
