@@ -123,27 +123,32 @@ bool fit_ground_plane_cells(const PointCloud& cloud, const GroundSegParams& p,
 
         struct CBand { double up, down; };
         const CBand cb[2] = {{0.10, 0.30}, {0.04, 0.10}};
+        std::vector<std::array<double, 3>> qc = q;     // 收敛后的保留子集(守门必须算在它上面)
         for (int pass = 0; pass < 2; ++pass) {
             std::vector<double> d2;
-            for (const auto& pt : q) {
+            std::vector<std::array<double, 3>> keep2;
+            for (const auto& pt : qc) {
                 const double r = enx * pt[0] + eny * pt[1] + enz * pt[2] + ed;
-                if (r <= cb[pass].up && r >= -cb[pass].down)
+                if (r <= cb[pass].up && r >= -cb[pass].down) {
                     d2.push_back(-(enx * pt[0] + eny * pt[1] + enz * pt[2]));
+                    keep2.push_back(pt);
+                }
             }
             if (d2.size() < 8) return false;
             std::sort(d2.begin(), d2.end());
             ed = d2[d2.size() / 2];
+            qc.swap(keep2);
         }
-        {   // 残差守门 (与自由路径同阈值)
+        {   // 残差守门: 与自由路径同口径 —— 算在**收敛后的保留子集**上(踩过: 算全量则恒被拒)
             double ss = 0.0;
-            for (const auto& pt : q) {
+            for (const auto& pt : qc) {
                 const double r = enx * pt[0] + eny * pt[1] + enz * pt[2] + ed;
                 ss += r * r;
             }
-            if (std::sqrt(ss / static_cast<double>(q.size())) > 0.05) return false;
+            if (std::sqrt(ss / static_cast<double>(qc.size())) > 0.05) return false;
         }
+        out.inliers = static_cast<int>(qc.size());
         out.nx = enx; out.ny = eny; out.nz = enz; out.d = ed;
-        out.inliers = static_cast<int>(q.size());
         // 高度先验校验 (与其余路径同口径)
         if (std::abs(-ed / enz - p.ground_prior_z) > p.prior_window + 0.05) {
             out.valid = false; return false;
