@@ -124,6 +124,29 @@ void build_heightmap_25(const PointCloud& cloud_base,
                         HeightMap25Result& out);
 
 // ============================================================
+// v2.9.3 深度质量守门 (方案 §4.3)
+// ============================================================
+// 动机(实机事故): 深度全 0 帧 (USB 重枚举/朝向错) 会造出 down=22~27 的假坑,
+// 顶层据此 13/13 全 STOP —— 坏数据比没有数据更危险。策略: 质量不达标时
+// 2.5D 判"未就绪"(调用方 abstain, 不把地形注入决策), 决策回落距离阶梯/超声。
+struct DepthQualityConfig {
+    // 依据: 实机对地帧 valid≈74%, 事故帧 = 0%; 0.25 留足余量(遮挡/低纹理场景不误伤)
+    static constexpr double min_valid_ratio = 0.25;
+    // 依据: 实机 640x480 下采样后约 2.5 万点; 300 只拦"帧可用但点数塌缩"
+    static constexpr int    min_points      = 300;
+};
+
+/** 深度质量未就绪的原因 (日志/诊断用) */
+enum class DepthQualityIssue {
+    Ok = 0,
+    NoValidPixels,   // 有效像素占比过低 (深度全 0 / 大面积失效)
+    TooFewPoints,    // 点云数过少 (帧可用但点数塌缩)
+};
+
+/** 深度质量守门: true = 可用于 2.5D; false = 判"未就绪", 调用方应 abstain */
+bool depth_quality_ok(double valid_ratio, int point_count, DepthQualityIssue& issue);
+
+// ============================================================
 // 走廊扫描 (近场地形避障用 —— 见 config.h TerrainAvoidConfig)
 // ============================================================
 /** 一次走廊扫描的聚合结果 */

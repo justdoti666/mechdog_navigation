@@ -234,7 +234,35 @@ static void test_wedge_legacy_equivalence() {
     CHECK(off.count_fov_unknown == off.count_unknown);
 }
 
+// v2.9.3 深度质量守门: 用例数字取自实机真值 (对地帧 valid≈74%/点≈2.5万; 事故帧全 0)
+static void test_depth_quality_gate() {
+    DepthQualityIssue why = DepthQualityIssue::Ok;
+
+    // 实机事故复盘: 深度全 0 (USB 重枚举) ⇒ 曾造假坑 down=22~27 → 13/13 STOP
+    CHECK(!depth_quality_ok(0.0, 0, why));
+    CHECK(why == DepthQualityIssue::NoValidPixels);
+
+    // 大面积失效 (5% 有效) ⇒ 未就绪
+    CHECK(!depth_quality_ok(0.05, 800, why));
+
+    // 帧"可用"但点数塌缩 ⇒ 未就绪
+    CHECK(!depth_quality_ok(0.80, 100, why));
+    CHECK(why == DepthQualityIssue::TooFewPoints);
+
+    // NaN (上游算出坏值) ⇒ fail-closed
+    CHECK(!depth_quality_ok(std::nan(""), 5000, why));
+
+    // 实机对地帧 (valid=0.744, 点=25689) ⇒ 放行
+    CHECK(depth_quality_ok(0.744, 25689, why));
+    CHECK(why == DepthQualityIssue::Ok);
+
+    // 边界: 恰好达标 ⇒ 放行; 略低 ⇒ 拦截
+    CHECK(depth_quality_ok(0.25, 300, why));
+    CHECK(!depth_quality_ok(0.249, 5000, why));
+}
+
 int main() {
+    test_depth_quality_gate();
     std::cout << "=== heightmap 2.5d tests ===" << std::endl;
     test_flat(); test_step_up(); test_cliff_down(); test_wall_only(); test_degenerate();
     test_too_steep();

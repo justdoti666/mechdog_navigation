@@ -47,6 +47,20 @@ std::string HeightMap25Result::stats() const {
     return std::string(buf);
 }
 
+// v2.9.3 深度质量守门 (见头文件说明)
+bool depth_quality_ok(double valid_ratio, int point_count, DepthQualityIssue& issue) {
+    if (!(valid_ratio >= DepthQualityConfig::min_valid_ratio)) {   // NaN 也拦 (fail-closed)
+        issue = DepthQualityIssue::NoValidPixels;
+        return false;
+    }
+    if (point_count < DepthQualityConfig::min_points) {
+        issue = DepthQualityIssue::TooFewPoints;
+        return false;
+    }
+    issue = DepthQualityIssue::Ok;
+    return true;
+}
+
 void build_heightmap_25(const PointCloud& cloud, const GroundSegResult& seg,
                         const HeightMap25Config& cfg, HeightMap25Result& out) {
     out = HeightMap25Result{};
