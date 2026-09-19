@@ -492,7 +492,55 @@ static void test_cell_min_fit_lower_envelope_beats_dense_upper_surface() {
     }
 }
 
+
+// ============================================================
+// v2.9 (TDD 红→绿): **重力约束的地面拟合**
+//   动机: 实机地板补丁极小(0.1~0.3 m², 21~76 格)且掠射 ⇒ 自由 3 自由度平面拟合的
+//         法向不可信(实测 tilt 8.8~14.3° 乱跳、RMS 2~5cm、支撑/残差守门全过不了)。
+//   方案: 地面法向由"机体姿态(IMU) + 相机安装外参"**直接给定** ⇒ 只拟合高度 d,
+//         平面拟合从 3 自由度降为 1 自由度 ⇒ 小补丁也稳定。
+//   本用例: 仅 5x5 格(0.25m×0.25m) + ±4mm 噪声; 约束后必须恢复 <1° 的真实水平面。
+// ============================================================
+static void test_gravity_constrained_fit_on_tiny_patch() {
+    GroundSegParams p;
+    p.ground_prior_z = -0.60;
+    p.prior_window   = 0.25;
+    p.use_cell_min_fit = true;
+    p.use_expected_normal = true;            // ← 新增: 用已知法向(来自 IMU+外参)
+    p.exp_nx = 0.0; p.exp_ny = 0.0; p.exp_nz = 1.0;
+
+    PointCloud c;
+    for (int i = 0; i < 5; ++i)
+        for (int j = 0; j < 5; ++j) {
+            Point3D q;
+            q.x = 1.00 + i * 0.05;
+            q.y = -0.10 + j * 0.05;
+            // 关键: 真实深度误差是**空间相关**的(平滑), 不是白噪声 —— 白噪声会被最小二乘平掉,
+            //   而平滑偏差会被 3 自由度拟合**误当成倾角**(实机就是这么出 8~14° 的)。
+            const double sy = (j - 2) * 0.05;                    // -0.10 .. +0.10 m
+            q.z = -0.60 + 0.15 * sy;                             // 0.2m 上 3cm 平滑偏差 ⇒ 约 8.5°
+            c.points.push_back(q);
+        }
+
+    GroundPlane pl;
+    CHECK(fit_ground_plane_cells(c, p, pl) == true);
+    if (pl.valid) {
+        const double tilt = std::acos(std::min(1.0, std::max(-1.0, pl.nz))) / 0.01745329251994329576;
+        CHECK(tilt < 1.0);                                    // 约束后必须接近真实水平
+        CHECK(std::abs(pl.height_at_origin() - (-0.60)) < 0.05);
+    }
+
+    // 对照组: 关掉约束 ⇒ 记录自由拟合在这点小补丁上的抖动
+    GroundSegParams q2 = p; q2.use_expected_normal = false;
+    GroundPlane pq;
+    if (fit_ground_plane_cells(c, q2, pq) && pq.valid) {
+        const double tq = std::acos(std::min(1.0, std::max(-1.0, pq.nz))) / 0.01745329251994329576;
+        std::cout << "  [对照] 自由拟合 tilt=" << tq << " deg  (约束后应 <1 deg)" << std::endl;
+    }
+}
+
 int main() {
+    test_gravity_constrained_fit_on_tiny_patch();   // v2.9
     test_cell_min_fit_finds_floor_under_tilted_contamination();   // v2.7
     test_cell_min_fit_falls_back_when_too_few_cells();            // v2.7
     test_cell_min_fit_enforces_tilt_and_prior();                  // v2.7

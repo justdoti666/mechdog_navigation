@@ -104,6 +104,54 @@ bool fit_ground_plane_cells(const PointCloud& cloud, const GroundSegParams& p,
         q.push_back({(key.first + 0.5) * cs, (key.second + 0.5) * cs, z});
     }
 
+    // ②' v2.9 重力约束路径: 法向已知 ⇒ 只拟合高度 d (1 自由度), 零随机、抗离群。
+    //     小补丁(0.1~0.3 m²)上自由 3 自由度拟合的法向会乱跳(实测 tilt 8.8~14.3°),
+    //     固定法向后退化为"稳健估计 d = -median(n·X) + 单边下包络精修"。
+    if (p.use_expected_normal) {
+        double enx = p.exp_nx, eny = p.exp_ny, enz = p.exp_nz;
+        const double enn = std::sqrt(enx * enx + eny * eny + enz * enz);
+        if (enn < 1e-9) return false;
+        enx /= enn; eny /= enn; enz /= enn;
+        if (enz < 0.0) { enx = -enx; eny = -eny; enz = -enz; }        // 统一 nz > 0
+        if (q.size() < 8) return false;
+
+        std::vector<double> dd;
+        dd.reserve(q.size());
+        for (const auto& pt : q) dd.push_back(-(enx * pt[0] + eny * pt[1] + enz * pt[2]));
+        std::sort(dd.begin(), dd.end());
+        double ed = dd[dd.size() / 2];
+
+        struct CBand { double up, down; };
+        const CBand cb[2] = {{0.10, 0.30}, {0.04, 0.10}};
+        for (int pass = 0; pass < 2; ++pass) {
+            std::vector<double> d2;
+            for (const auto& pt : q) {
+                const double r = enx * pt[0] + eny * pt[1] + enz * pt[2] + ed;
+                if (r <= cb[pass].up && r >= -cb[pass].down)
+                    d2.push_back(-(enx * pt[0] + eny * pt[1] + enz * pt[2]));
+            }
+            if (d2.size() < 8) return false;
+            std::sort(d2.begin(), d2.end());
+            ed = d2[d2.size() / 2];
+        }
+        {   // 残差守门 (与自由路径同阈值)
+            double ss = 0.0;
+            for (const auto& pt : q) {
+                const double r = enx * pt[0] + eny * pt[1] + enz * pt[2] + ed;
+                ss += r * r;
+            }
+            if (std::sqrt(ss / static_cast<double>(q.size())) > 0.05) return false;
+        }
+        out.nx = enx; out.ny = eny; out.nz = enz; out.d = ed;
+        out.inliers = static_cast<int>(q.size());
+        // 高度先验校验 (与其余路径同口径)
+        if (std::abs(-ed / enz - p.ground_prior_z) > p.prior_window + 0.05) {
+            out.valid = false; return false;
+        }
+        out.valid = true;
+        return true;
+    }
+
     // ② 稳健播种: 先用**最低 25% 的格**做最小二乘, 得到**自带倾角**的种子平面。
     //    (只用"水平面 + 低分位高度"当种子, 对倾斜地面 (台架实测 ~13°) 会因单边 up 上限
     //     把地板自己削掉 → keep<12 早退; 用低分位子集拟合则种子自带倾角。)

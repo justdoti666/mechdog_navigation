@@ -47,6 +47,15 @@ struct GroundSegParams {
     //   动因: RANSAC 从 1.2m 高候选带盲抽三点却要求 h0 落在 ±prior_window ⇒ 命中靠运气
     //   (真机实测: step=8 能拟合、step=1 反而找不到; 窗口 0.10↔0.15 结果翻车)。
     bool     use_cell_min_fit  = false;
+
+    // v2.9 重力约束的地面拟合 (IMU 落地后用; 默认关 = 历史行为不变)
+    //   法向由"机体姿态(IMU) + 相机安装外参"直接给出 ⇒ 平面拟合从 3 自由度降为 1
+    //   (只解高度 d = -median(n·X))。动因: 实机地板补丁仅 0.1~0.3 m²(21~76 格)且掠射,
+    //   自由拟合的法向不可信(实测 tilt 8.8~14.3° 乱跳、RMS 2~5cm)。
+    //   exp_n* 为**期望地面法向在输入点云坐标系(base)下的方向**, 调用方按
+    //   R_body_from_camera · (相机系地面法向) 算出; 无 IMU 时可传 (0,0,1)(假设机体水平)。
+    bool     use_expected_normal = false;
+    double   exp_nx = 0.0, exp_ny = 0.0, exp_nz = 1.0;
 };
 
 /** 拟合出的地面平面: nx*x + ny*y + nz*z + d = 0, 单位法向且 nz > 0 (指向天空) */
