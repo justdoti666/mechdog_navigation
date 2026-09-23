@@ -600,6 +600,52 @@ static void test_align_to_gravity_unit() {
     CHECK(std::fabs(d1 - d0) < 1e-9);       // 刚体: 距离保持
 }
 
+
+// ============================================================
+// 9. v2.9.9 带步长反投影 (提速) 的等价性保障
+//    性质: strided 点集的每个点, 都与 depth_to_cloud 在同像素算出的点**逐位相同**(子集关系)
+// ============================================================
+static void test_strided_backprojection_subset() {
+    const int w = 64, h = 48;
+    std::vector<uint16_t> d(static_cast<size_t>(w) * h, 0);
+    for (int v = 0; v < h; ++v) {
+        for (int u = 0; u < w; ++u) {
+            if (((u * 3 + v * 5) % 7) == 0) continue;       // 造孔洞(无效像素)
+            d[static_cast<size_t>(v) * w + u] = static_cast<uint16_t>(800 + u * 5 + v * 3);
+        }
+    }
+    CameraIntrinsics K;
+    K.fx = 570.34; K.fy = 570.34;
+    K.cx = (w - 1) * 0.5; K.cy = (h - 1) * 0.5;
+    K.min_depth_m = 0.3; K.max_depth_m = 8.0;
+
+    PointCloud full, st;
+    depth_to_cloud(d.data(), w, h, K, full);
+    depth_to_cloud_strided(d.data(), w, h, K, 8, st);
+    CHECK(!full.points.empty());
+    CHECK(!st.points.empty());
+
+    bool all_in = true;                                     // ① 逐位子集
+    for (size_t i = 0; i < st.points.size(); ++i) {
+        bool found = false;
+        for (size_t j = 0; j < full.points.size(); ++j) {
+            const Point3D& p = st.points[i];
+            const Point3D& q = full.points[j];
+            if (p.x == q.x && p.y == q.y && p.z == q.z) { found = true; break; }
+        }
+        if (!found) { all_in = false; break; }
+    }
+    CHECK(all_in);
+    CHECK(st.points.size() > full.points.size() / 12);       // ② 密度约 1/8
+    CHECK(st.points.size() < full.points.size() / 4);
+
+    PointCloud one;                                          // ③ step<=1 退化为完全一致
+    depth_to_cloud_strided(d.data(), w, h, K, 1, one);
+    CHECK(one.points.size() == full.points.size());
+    CHECK(one.points[0].x == full.points[0].x);
+    CHECK(one.points[one.points.size() - 1].z == full.points[full.points.size() - 1].z);
+}
+
 int main() {
     test_backprojection_plane();
     test_intrinsics_center_pixel();
@@ -618,6 +664,8 @@ int main() {
     test_screen_decimate();
     test_transform_to_base_frame_contract();   // FIX-10
     test_align_to_gravity_unit();              // 用法A: 重力对齐单元测试
+
+    test_strided_backprojection_subset();      // v2.9.9 带步长反投影(提速)等价性
 
     std::cout << "passed=" << g_passed << " failed=" << g_failed << std::endl;
     return g_failed == 0 ? 0 : 1;

@@ -79,6 +79,15 @@ struct CameraExtrinsics {
 void depth_to_cloud(const uint16_t* depth, int w, int h,
                     const CameraIntrinsics& K, PointCloud& out);
 
+// 带步长的反投影 (v2.9.9, 纯提速, 老接口语义不变):
+//   只对 u ∈ {0, step, 2*step, ...} 与全部 v 的像素做反投影 —— 直接得到"抽稀点云",
+//   省掉"全量反投影 + 全量 optical→link 变换"两次全分辨率遍历(真机实测 ~42ms/帧)。
+//   性质: 输出的每个点都与 depth_to_cloud 在同像素上算出的点**逐位相同**
+//        (即新点集是 full 点集的子集), 见 tests/test_point_cloud.cpp。
+//   step <= 1 时退化为与 depth_to_cloud 完全一致。
+void depth_to_cloud_strided(const uint16_t* depth, int w, int h,
+                            const CameraIntrinsics& K, int step, PointCloud& out);
+
 // 全帧有效深度像素计数 (600~8000mm 口径与 depth_to_cloud 一致; 可视化空态诊断数据源)
 size_t count_valid_pixels(const std::vector<uint16_t>& depth_map);
 

@@ -60,6 +60,37 @@ void depth_to_cloud(const uint16_t* depth, int w, int h,
 }
 
 // ============================================================
+// 带步长反投影 (v2.9.9): 与 depth_to_cloud 同口径(px==0 / 超范围丢弃),
+//   但只遍历 u ∈ {0, step, 2*step, ...}、v 全遍历 —— 输出点集是前者的子集(逐位相同)。
+//   动因(真机实测 2026-09-23): 全量 30.7 万像素反投影 + 全量 optical→link 变换
+//     ≈ 42 ms/帧 ⇒ 节点在 19Hz 深度流下 CPU 达 81%; 感知仅需 1/8 密度。
+// ============================================================
+void depth_to_cloud_strided(const uint16_t* depth, int w, int h,
+                            const CameraIntrinsics& K, int step, PointCloud& out) {
+    out.points.clear();
+    out.frame_id = "camera_optical";
+    if (!depth || w <= 0 || h <= 0) return;
+    if (!(K.fx > 0.0) || !(K.fy > 0.0)) return;
+    if (step <= 1) { depth_to_cloud(depth, w, h, K, out); return; }
+    const int s = (step > w) ? w : step;           // 防御: 步长超过宽度时按宽度取
+    out.points.reserve(static_cast<size_t>(w / s + 1) * static_cast<size_t>(h));
+    for (int v = 0; v < h; ++v) {
+        const uint16_t* row = depth + static_cast<size_t>(v) * w;
+        for (int u = 0; u < w; u += s) {
+            const uint16_t px = row[u];
+            if (px == 0) continue;
+            const double d = px / 1000.0;
+            if (d < K.min_depth_m || d > K.max_depth_m) continue;
+            Point3D p;
+            p.x = (u - K.cx) * d / K.fx;
+            p.y = (v - K.cy) * d / K.fy;
+            p.z = d;
+            out.points.push_back(p);
+        }
+    }
+}
+
+// ============================================================
 // camera_optical → camera_link 固定旋转 (§6.1)
 //
 // 矩阵 [[0,0,1],[-1,0,0],[0,-1,0]] = Rz(-90°)·Rx(-90°):
