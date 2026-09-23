@@ -268,6 +268,8 @@ AstraFrame AstraProDriver::capture_real() {
                                          frame.depth_height, "left");
     frame.right_region  = analyze_region(frame.depth_map, frame.depth_width,
                                          frame.depth_height, "right");
+    // v2.9.10: 补上精确有效像素数(SDK 路径; 话题路径由 inject_depth_frame 顺带算出)
+    frame.valid_pixel_count = count_valid_pixels(frame.depth_map);
 
     // 环境判定: 深度图无效像素比例代理 (ALG-3 v2.2: ambient_light_level 改局部变量, 不再存帧字段)
     double ambient_light = estimate_ambient_light(frame.depth_map,
@@ -355,6 +357,16 @@ AstraFrame AstraProDriver::simulate_frame() {
 }
 
 // ========== 深度区域分析 ==========
+size_t AstraProDriver::count_valid_pixels(const std::vector<uint16_t>& depth_map) {
+    size_t n = 0;
+    for (size_t i = 0; i < depth_map.size(); ++i) {
+        const uint16_t v = depth_map[i];
+        if (v >= static_cast<uint16_t>(MIN_VALID_DISTANCE_MM) &&
+            v <= static_cast<uint16_t>(MAX_VALID_DISTANCE_MM)) ++n;
+    }
+    return n;
+}
+
 DepthRegion AstraProDriver::analyze_region(const std::vector<uint16_t>& depth_map,
                                            int width, int height,
                                            const std::string& region) {
@@ -457,20 +469,67 @@ bool AstraProDriver::inject_depth_frame(const std::vector<uint16_t>& depth_map,
     frame.depth_width  = width;
     frame.depth_height = height;
 
-    // 值域过滤 (与 capture_real 同口径: 0 = 无效)
+    // v2.9.10 提速 (真机 gdb 采样定位): 原实现每帧跑 **4 遍全分辨率扫描** ——
+    //   ① 值域过滤(清洗 30.7 万) ② estimate_ambient_light(再 30.7 万计数)
+    //   ③ analyze_region ×3 (中间半幅的 3 个互不相交列带, 合计 11.5 万)
+    //   现合并为**一遍**: 清洗 + 全帧有效计数 + 三区域统计同时完成。
+    //   等价性: 判断条件/累加方式/区域边界与旧实现逐字相同, 且三区域互不相交
+    //   (left [0,w/4) · center [w/4,3w/4) · right [3w/4,w), 三者行范围均为 [h/4,3h/4))
+    //   ⇒ 结果与旧实现**逐位相同**。旧 4 遍写法保留在 tests 里作对照基准。
     frame.depth_map.resize(need);
-    for (size_t i = 0; i < need; ++i) {
-        const uint16_t v = depth_map[i];
-        frame.depth_map[i] = (v >= static_cast<uint16_t>(MIN_VALID_DISTANCE_MM) &&
-                              v <= static_cast<uint16_t>(MAX_VALID_DISTANCE_MM)) ? v : 0;
+    const int ry0 = height / 4, ry1 = height * 3 / 4;
+    const int rx_lo = width / 4, rx_hi = width * 3 / 4;
+    const int rrows = (ry1 - ry0);
+    const int tot_c = (rx_hi - rx_lo) * rrows;
+    const int tot_l = rx_lo * rrows;
+    const int tot_r = (width - rx_hi) * rrows;
+    struct Acc {
+        double sum = 0.0; int n = 0;
+        double mn = static_cast<double>(MAX_VALID_DISTANCE_MM), mx = 0.0;
+        std::vector<double> vals;
+    } ac, al, ar;
+    size_t valid_all = 0;
+    for (int y = 0; y < height; ++y) {
+        const uint16_t* row = depth_map.data() + static_cast<size_t>(y) * width;
+        uint16_t* orow = frame.depth_map.data() + static_cast<size_t>(y) * width;
+        const bool y_in = (y >= ry0 && y < ry1);
+        for (int x = 0; x < width; ++x) {
+            const uint16_t v = row[x];
+            const bool ok = (v >= static_cast<uint16_t>(MIN_VALID_DISTANCE_MM) &&
+                             v <= static_cast<uint16_t>(MAX_VALID_DISTANCE_MM));
+            orow[x] = ok ? v : 0;
+            if (!ok) continue;
+            ++valid_all;
+            if (!y_in) continue;
+            Acc* a = (x < rx_lo) ? &al : ((x < rx_hi) ? &ac : &ar);
+            a->sum += v; ++a->n; a->vals.push_back(v);
+            if (v < a->mn) a->mn = v;
+            if (v > a->mx) a->mx = v;
+        }
     }
-
-    frame.center_region = analyze_region(frame.depth_map, width, height, "center");
-    frame.left_region   = analyze_region(frame.depth_map, width, height, "left");
-    frame.right_region  = analyze_region(frame.depth_map, width, height, "right");
-    frame.environment   = classify_environment(
-        estimate_ambient_light(frame.depth_map, width, height));
-    frame.valid     = true;                    // H1 口径: 无有效像素时融合层按 ratio==0 判无效
+    frame.valid_pixel_count = valid_all;          // v2.9.10: 精确有效像素数(供节点免再扫一遍全图)
+    auto region_from = [&](const Acc& a, int total) {
+        DepthRegion reg;
+        reg.valid_pixel_ratio = total > 0 ? static_cast<double>(a.n) / total : 0.0;
+        reg.center_distance_m = a.n > 0 ? (a.sum / a.n) / 1000.0 : 0.0;
+        reg.min_distance_m    = a.n > 0 ? a.mn / 1000.0
+                                        : static_cast<double>(MAX_VALID_DISTANCE_MM) / 1000.0;
+        reg.max_distance_m    = a.n > 0 ? a.mx / 1000.0 : 0.0;
+        reg.obstacle_count    = a.n;
+        reg.quality_score     = calc_quality(a.vals, total);
+        return reg;
+    };
+    frame.center_region = region_from(ac, tot_c);
+    frame.left_region   = region_from(al, tot_l);
+    frame.right_region  = region_from(ar, tot_r);
+    {   // 环境判定: 与旧 estimate_ambient_light 同式(无效像素比例代理)
+        const double ratio = (need > 0) ? static_cast<double>(valid_all) / static_cast<double>(need) : 0.0;
+        double light = 1.0 - ratio;
+        if (light < 0.0) light = 0.0;
+        if (light > 1.0) light = 1.0;
+        frame.environment = classify_environment(light);
+    }
+frame.valid     = true;                    // H1 口径: 无有效像素时融合层按 ratio==0 判无效
     frame.frame_seq = ++frame_seq_counter_;
 
     {

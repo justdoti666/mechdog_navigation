@@ -63,6 +63,11 @@ struct AstraFrame {
     std::vector<uint16_t> depth_map;
     int depth_width  = 640;
     int depth_height = 480;
+
+    // v2.9.10: 本帧"有效像素数"(清洗后非零的个数)。由 inject_depth_frame 在
+    //   合并后的单遍扫描里顺带算出(精确值, 非抽样)。默认 0 ⇒ 其它构造点无需改动,
+    //   消费者(节点)据此免去再跑一遍全图计数(原实现每轮多扫 30.7 万像素)。
+    size_t valid_pixel_count = 0;
 };
 
 // ------------------------------------------------------------
@@ -169,6 +174,11 @@ private:
     double calc_quality(const std::vector<double>& valid_values, int region_pixels);
     double estimate_ambient_light(const std::vector<uint16_t>& depth_map,
                                   int width, int height);
+
+    // v2.9.10: 单遍统计"有效像素数"(口径: >=MIN_VALID_DISTANCE_MM 且 <=MAX_VALID_DISTANCE_MM)。
+    //   仅 SDK 采集路径(capture_real)用它补上 AstraFrame::valid_pixel_count —— 话题注入
+    //   路径(inject_depth_frame)已在合并扫描里顺带算出, 无需再走这里。
+    static size_t count_valid_pixels(const std::vector<uint16_t>& depth_map);
     EnvironmentType classify_environment(double light_level);
 };
 
