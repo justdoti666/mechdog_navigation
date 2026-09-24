@@ -261,8 +261,108 @@ static void test_depth_quality_gate() {
     CHECK(!depth_quality_ok(0.249, 5000, why));
 }
 
+
+// ============================================================
+// v2.9.12 (OFFLINE_TODO #6) 深度守门"结构盲区"表征用例
+//   背景: depth_quality_ok(valid_ratio, point_count) 只看两个**聚合量** ⇒ 对"结构"失明:
+//         一半行全 0 / 条纹 的帧, valid_ratio 仍可达 0.5 ⇒ 直接放行 ✗
+//   这里不假设结论, 而是**测出下游 build_heightmap_25 的实际表现**, 并把风险点写在断言旁。
+//   ⚠ 若下面出现 "风险" 字样 ⇒ 说明当前行为有缺口; 修法(结构级守门)属**安全口径变更** ⇒ 需师兄拍板。
+// ============================================================
+static PointCloud make_floor_grid(double z, int nx, int ny) {
+    PointCloud c;
+    for (int i = 0; i < nx; ++i) {
+        for (int j = 0; j < ny; ++j) {
+            Point3D p;
+            p.x = 0.6 + 2.4 * i / (nx - 1.0);          // x 0.6~3.0m
+            p.y = -2.5 + 5.0 * j / (ny - 1.0);         // y ±2.5m
+            p.z = z;
+            c.points.push_back(p);
+        }
+    }
+    return c;
+}
+
+static void report_hm(const char* tag, const HeightMap25Result& hm) {
+    int up = 0, down = 0, steep = 0, tr = 0, unk = 0;
+    for (CellFlag f : hm.flag) {
+        switch (f) {
+            case CellFlag::Traversable: ++tr; break;
+            case CellFlag::ObstacleUp:  ++up; break;
+            case CellFlag::CliffDown:   ++down; break;
+            case CellFlag::TooSteep:    ++steep; break;
+            default: ++unk; break;
+        }
+    }
+    printf("  [%s] trav=%d up=%d **down=%d** steep=%d unknown=%d (总格=%d)\n",
+           tag, tr, up, down, steep, unk, (int)hm.flag.size());
+}
+
+static void test_bad_frame_structures() {
+    GroundSegParams g;                       // 台架口径(与实机一致)
+    g.ground_prior_z = -0.75;
+    g.prior_window = 0.10;
+    HeightMap25Config cfg;
+    cfg.wedge_only = true;
+
+    // ---- ① 完整地板: 基线 ----
+    {
+        PointCloud c = make_floor_grid(-0.75, 60, 60);
+        GroundSegResult seg; segment_ground(c, g, seg);
+        HeightMap25Result hm; build_heightmap_25(c, seg, cfg, hm);
+        report_hm("完整地板(基线)", hm);
+        CHECK(seg.plane.valid);
+        { DepthQualityIssue why0 = DepthQualityIssue::Ok;
+          CHECK(depth_quality_ok(1.0, (int)c.points.size(), why0)); }   // 放行 ✓
+    }
+    // ---- ② 左半全缺(模拟半幅失效) ----
+    {
+        PointCloud c = make_floor_grid(-0.75, 60, 60);
+        PointCloud half; half.points.reserve(c.points.size() / 2);
+        for (const auto& q : c.points) if (q.y >= 0.0) half.points.push_back(q);
+        const double ratio = 0.5;            // 聚合量视角: 0.5 ⇒ **守门放行** ✗
+        DepthQualityIssue why = DepthQualityIssue::Ok;
+        const bool pass = depth_quality_ok(ratio, (int)half.points.size(), why);
+        GroundSegResult seg; segment_ground(half, g, seg);
+        HeightMap25Result hm; build_heightmap_25(half, seg, cfg, hm);
+        report_hm("左半全缺(ratio 0.50 放行)", hm);
+        CHECK(pass);                          // ← 记录: 守门确实放行(结构性缺口)
+        CHECK(hm.valid);
+    }
+    // ---- ③ 条纹(每隔一行全缺) ----
+    {
+        PointCloud c = make_floor_grid(-0.75, 60, 60);
+        PointCloud stripe; stripe.points.reserve(c.points.size() / 2);
+        int row = 0;
+        for (int i = 0; i < 60; ++i)
+            for (int j = 0; j < 60; ++j, ++row)
+                if ((i % 2) == 0) stripe.points.push_back(c.points[static_cast<size_t>(i) * 60 + j]);
+        DepthQualityIssue why = DepthQualityIssue::Ok;
+        const bool pass = depth_quality_ok(0.5, (int)stripe.points.size(), why);
+        GroundSegResult seg; segment_ground(stripe, g, seg);
+        HeightMap25Result hm; build_heightmap_25(stripe, seg, cfg, hm);
+        report_hm("条纹(每2行缺1, ratio 0.50 放行)", hm);
+        CHECK(pass);                          // ← 同样被放行
+        CHECK(hm.valid);
+        if (seg.plane.valid) {                // 条纹是否把平面带歪 ⇒ 是否产生假坑
+            const double tilt_deg = std::acos(std::fabs(seg.plane.nz)) / 0.01745329251994329576;
+            printf("    条纹帧拟合 tilt=%.2f° 内点=%d ⇒ %s\n", tilt_deg, seg.plane.inliers,
+                   (tilt_deg > 5.0) ? "!! 平面被带歪(可能产生假坑/假凸起)" : "平面仍稳");
+        }
+    }
+    // ---- ④ 时域抖动: 单帧无状态函数**无法**发现 ----
+    {
+        DepthQualityIssue why = DepthQualityIssue::Ok;
+        // 两帧各自都合格, 但交替 0.9 / 0.26 ⇒ 无状态门限两次都放行(缺口在"时间维")
+        CHECK(depth_quality_ok(0.90, 25000, why));
+        CHECK(depth_quality_ok(0.26, 25000, why));
+        printf("  时域抖动: 单帧函数无状态 ⇒ 无法发现(需新增有状态机制, 属安全口径变更 ⇒ 师兄)\n");
+    }
+}
+
 int main() {
     test_depth_quality_gate();
+    test_bad_frame_structures();
     std::cout << "=== heightmap 2.5d tests ===" << std::endl;
     test_flat(); test_step_up(); test_cliff_down(); test_wall_only(); test_degenerate();
     test_too_steep();
