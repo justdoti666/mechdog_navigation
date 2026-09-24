@@ -811,6 +811,57 @@ static void test_terrain_near_block_stops() {
           == NavigationAction::FORWARD);
 }
 
+// ============================================================
+// 路1 边界对加固 (OFFLINE_TODO #4) —— 把"已跑通的行为"锁进单测
+//   约定来源 config.h: near_x_lo_m=0.40 / near_x_hi_m=1.20 / corridor_y_half_m=0.30
+//                     bump_stop_x_m=0.70 (盲区 0.6 + 机身余量) / 正中 |y|<=0.18
+//   每个判据都测"界内 / 界外"一对, 任一侧回归都会被抓住。
+// ============================================================
+static NavigationAction act_with_cell(SensorFusion& fusion, const std::unordered_map<std::string, FusedObstacle>& none,
+                                      double wx, double wy, CellFlag f, bool fwd_ok = true) {
+    GroundSegResult no_neg;
+    fusion.set_local_terrain(make_hm25_cell(wx, wy, f), no_neg);
+    return SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, fwd_ok);
+}
+
+static void test_terrain_threshold_edges() {
+    AstraProDriver astra(true);
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    InfraRedSensor ir(true);
+    SensorFusion fusion(&astra, &ultrasonic, &ir);
+    const std::unordered_map<std::string, FusedObstacle> none;
+
+    // ---- ① 贴身判据 bump_stop_x_m = 0.70 (凸起, 正中) ----
+    CHECK(act_with_cell(fusion, none, 0.70, 0.0, CellFlag::ObstacleUp) == NavigationAction::STOP);          // 界内(含)
+    CHECK(act_with_cell(fusion, none, 0.75, 0.0, CellFlag::ObstacleUp) == NavigationAction::SLOW_FORWARD);  // 界外 ⇒ 降速
+    CHECK(act_with_cell(fusion, none, 0.65, 0.0, CellFlag::ObstacleUp) == NavigationAction::STOP);          // 更近 ⇒ 停
+
+    // ---- ② 正中判据 |y| <= 0.18 (贴身凸起) ----
+    CHECK(act_with_cell(fusion, none, 0.65,  0.18, CellFlag::ObstacleUp) == NavigationAction::STOP);          // 界内(含) ⇒ 正中
+    CHECK(act_with_cell(fusion, none, 0.65,  0.20, CellFlag::ObstacleUp) == NavigationAction::TURN_RIGHT);    // 偏左 ⇒ 向右让
+    CHECK(act_with_cell(fusion, none, 0.65, -0.20, CellFlag::ObstacleUp) == NavigationAction::TURN_LEFT);     // 偏右 ⇒ 向左让
+
+    // ---- ③ 走廊近界 near_x_lo_m = 0.40 ----
+    CHECK(act_with_cell(fusion, none, 0.40, 0.0, CellFlag::CliffDown) == NavigationAction::STOP);   // 界内 ⇒ 参与
+    CHECK(act_with_cell(fusion, none, 0.35, 0.0, CellFlag::CliffDown) == NavigationAction::FORWARD); // 界外 ⇒ 不参与(路1 不表态)
+
+    // ---- ④ 走廊远界 near_x_hi_m = 1.20 (近场 STOP / 中距 至少降速) ----
+    CHECK(act_with_cell(fusion, none, 1.20, 0.0, CellFlag::CliffDown) == NavigationAction::STOP);
+    CHECK(act_with_cell(fusion, none, 1.25, 0.0, CellFlag::CliffDown) == NavigationAction::SLOW_FORWARD);
+
+    // ---- ⑤ 走廊半宽 corridor_y_half_m = 0.30 ----
+    CHECK(act_with_cell(fusion, none, 0.80,  0.30, CellFlag::CliffDown) == NavigationAction::STOP);    // 界内(含)
+    CHECK(act_with_cell(fusion, none, 0.80,  0.35, CellFlag::CliffDown) == NavigationAction::FORWARD);  // 界外 ⇒ 不参与
+
+    // ---- ⑥ 回归: 清除地形后必须回到"零影响" ----
+    fusion.clear_local_terrain();
+    GroundSegResult no_neg;
+    fusion.set_local_terrain(make_hm25_cell(0.5, 0.0, CellFlag::CliffDown), no_neg);
+    fusion.clear_local_terrain();
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::FORWARD);
+}
+
 static void test_terrain_mid_slow_and_dodge() {
     AstraProDriver astra(true);
     UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
@@ -946,6 +997,7 @@ int main() {
     test_terrain_near_block_stops();            // 路1: 近场地形 → STOP
     test_terrain_mid_slow_and_dodge();          // 路1: 中距地形 → 降速/让开
     test_terrain_corridor_bounds_and_negative_points();  // 路1: 走廊边界 + 负障碍点
+    test_terrain_threshold_edges();             // 路1: 边界对加固(#4)
     test_ultrasonic_disabled_removes_cliff_layer();      // v2.5: 超声链路可禁用 (真机无硬件)
 
     std::cout << "passed=" << g_passed << " failed=" << g_failed << std::endl;
