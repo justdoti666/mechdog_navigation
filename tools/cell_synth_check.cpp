@@ -193,7 +193,60 @@ static void run_slope_experiment() {
     }
 }
 
+
+static GroundSegResult seg_dummy(const PointCloud& base, const GroundSegParams& g) {
+    GroundSegResult s; segment_ground(base, g, s); return s;
+}
+
+// ============================================================
+// 追加 (OFFLINE_TODO #5 证据): 视场楔形在"相机偏航"下的失配有多大?
+//   现状: in_fov() 假设楔形**对称于 y=0** (|wy| <= 0.561*wx + 0.15), 与 yaw 无关;
+//         config 注释承认"yaw 未标定时用 0.15m 余量避免切掉真实视野"。
+//   实验: 合成地板 + 相机偏航 φ ∈ {0,5,10,20,30}°, 统计
+//         ① 真实有数据的格 (known) ② 楔形声称在视场内的格 (in_fov)
+//         ③ **有数据却在楔形外** (漏掉的真视野, 越多越糟) ④ 楔形内却没数据
+// ============================================================
+static void wedge_yaw_case(double yaw_deg) {
+    const int W = 640, HP = 480;
+    const double fx = 570.3422047415297129, fy = fx, ccx = 319.5, ccy = 239.5;
+    const double H = 0.18, pitch = 15.0, roll = 0.0;
+    // 地板 z = -H (相机在原点, 俯角 15°, 偏航 yaw_deg)
+    std::vector<std::array<double, 4>> pl = {{0.0, 0.0, 1.0, H}};
+    auto depth = render_planes(W, HP, fx, fy, ccx, ccy, pl, pitch, roll, yaw_deg, 8.0, 0.10, 4242);
+    CameraIntrinsics K; K.fx = fx; K.fy = fy; K.cx = ccx; K.cy = ccy;
+    K.min_depth_m = 0.3; K.max_depth_m = 8.0;
+    PointCloud opt, base;
+    depth_to_cloud_strided(depth.data(), W, HP, K, 8, opt);
+    CameraExtrinsics E; E.x = 0.12; E.y = 0.0; E.z = 0.0;
+    E.roll = roll * D2R; E.pitch = pitch * D2R; E.yaw = yaw_deg * D2R;
+    transform_to_base(opt, E, base);
+    GroundSegParams g; g.ground_prior_z = -H; g.prior_window = 0.10;
+    g.plane_max_tilt_deg = 15.0; g.point_on_plane_eps = 0.02; g.cell_size = 0.05;
+    g.use_cell_min_fit = true;
+    HeightMap25Config cfg; cfg.wedge_only = false;      // 保留全体格以做对比
+    HeightMap25Result hm; build_heightmap_25(base, seg_dummy(base, g), cfg, hm);
+    int known = 0, infov = 0, known_outside = 0, infov_empty = 0;
+    for (int r = 0; r < hm.rows; ++r)
+        for (int c = 0; c < hm.cols; ++c) {
+            const size_t i = static_cast<size_t>(r) * hm.cols + c;
+            const bool is_known = (hm.flag[i] != CellFlag::Unknown);
+            const bool is_fov = hm.in_fov(c, r);
+            if (is_known) ++known;
+            if (is_fov) ++infov;
+            if (is_known && !is_fov) ++known_outside;   // ★ 真视野被楔形漏掉
+            if (is_fov && !is_known) ++infov_empty;
+        }
+    printf("  yaw=%4.0f° | 有数据格 known=%5d | 楔形 in_fov=%5d | ★真视野被漏掉=%5d (%.1f%% of known) | 楔形内空=%5d\n",
+           yaw_deg, known, infov, known_outside, known ? 100.0 * known_outside / known : 0.0, infov_empty);
+}
+
+static void run_wedge_yaw_experiment() {
+    printf("\n=== D: 楔形 vs 相机偏航 (装机几何 0.18m/俯角15°) ===\n");
+    for (double yy : {0.0, 5.0, 10.0, 20.0, 30.0}) wedge_yaw_case(yy);
+}
+
 int main() {
+    run_wedge_yaw_experiment();
     run_slope_experiment();
     printf("=== 装机几何 (相机 0.18m / 俯角 15°) ===\n");
     run_case("装机/理想(yaw=0)",        0.18, 15.0, 0.0,   0.0, true);
