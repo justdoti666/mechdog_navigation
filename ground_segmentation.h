@@ -48,6 +48,12 @@ struct GroundSegParams {
     //   (真机实测: step=8 能拟合、step=1 反而找不到; 窗口 0.10↔0.15 结果翻车)。
     bool     use_cell_min_fit  = false;
 
+    // v2.9.16 (2026-09-25 师兄口径): cell 成功时**跳过 RANSAC**。
+    //   旧行为 = cell 拟合后仍无条件跑满 RANSAC 并覆盖: 费时(真机 11~16ms/帧, 感知链最大头)
+    //   且改坏精度(合成真值: cell 单独 0.02° vs 覆盖后 0.98~1.39°)。
+    //   仅当 use_cell_min_fit=true 时有效; 置 false 可回到旧行为(供 A/B 与排查)。
+    bool     cell_skip_ransac  = true;
+
     // v2.9 重力约束的地面拟合 (IMU 落地后用; 默认关 = 历史行为不变)
     //   法向由"机体姿态(IMU) + 相机安装外参"直接给出 ⇒ 平面拟合从 3 自由度降为 1
     //   (只解高度 d = -median(n·X))。动因: 实机地板补丁仅 0.1~0.3 m²(21~76 格)且掠射,
@@ -73,6 +79,9 @@ struct GroundSegResult {
     std::vector<int> ground_indices;
     std::vector<int> obstacle_indices;
     std::vector<Point3D> negative_points;  // base_link 系, z = 该 cell 的平面高度
+    // v2.9.16: 最终平面来自哪条路径 (日志/真机核查用)
+    bool used_cell   = false;   // ⓪ 确定性 cell 拟合产出过平面
+    bool used_ransac = false;   // ① RANSAC 覆盖了最终平面
 };
 
 /**

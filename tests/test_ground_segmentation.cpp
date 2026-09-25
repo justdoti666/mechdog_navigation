@@ -494,6 +494,41 @@ static void test_cell_min_fit_lower_envelope_beats_dense_upper_surface() {
 
 
 // ============================================================
+// v2.9.16 (TDD 红->绿; 2026-09-25 师兄口径): **cell 成功时跳过 RANSAC**。
+//   构造 "RANSAC 会选错" 的场景: 真地板(-0.60, 稀疏 0.10 格) + 桌面(-0.42, 更密 0.05 格, 在高度带内)。
+//   RANSAC 按内点数取胜 => 会被拽到桌面; cell(下包络) 给出的是**地板**。
+//   => 只有 "cell 成功就不再被 RANSAC 覆盖" 时, 平面才停在地板上。
+static void test_cell_skip_ransac_keeps_cell_plane() {
+    GroundSegParams p;
+    p.ground_prior_z   = -0.60;
+    p.prior_window     = 0.25;
+    p.use_cell_min_fit = true;
+    PointCloud c;
+    for (double x = 0.6; x <= 3.0 + 1e-9; x += 0.10)      // 真地板: 稀疏
+        for (double y = -1.0; y <= 1.0 + 1e-9; y += 0.10)
+            c.points.push_back(mkpt(x, y, -0.60));
+    for (double x = 0.7; x <= 2.5 + 1e-9; x += 0.05)      // 桌面: 更密 (RANSAC 内点数更多)
+        for (double y = -0.6; y <= 0.6 + 1e-9; y += 0.05)
+            c.points.push_back(mkpt(x, y, -0.42));
+    GroundSegResult seg;
+    segment_ground(c, p, seg);
+    CHECK(seg.plane.valid == true);
+    const double h = seg.plane.height_at_origin();
+    std::cout << "  [skip_ransac] plane h0 = " << h << " m (expect floor -0.60)" << std::endl;
+    CHECK(std::abs(h - (-0.60)) < 0.05);   // 只有 "跳过 RANSAC" 才成立
+    CHECK(seg.used_cell == true);
+    CHECK(seg.used_ransac == false);
+    // 反向: 显式关掉 (回到旧行为) => RANSAC 覆盖, 平面被拽到桌面
+    GroundSegParams q = p;
+    q.cell_skip_ransac = false;
+    GroundSegResult seg2;
+    segment_ground(c, q, seg2);
+    CHECK(seg2.plane.valid == true);
+    const double h2 = seg2.plane.height_at_origin();
+    std::cout << "  [skip_ransac=false] plane h0 = " << h2 << " m (旧行为, 期望被拽到桌面 -0.42)" << std::endl;
+    CHECK(std::abs(h2 - (-0.42)) < 0.05);  // 旧行为回归保护 (种子固定, 确定性)
+    CHECK(seg2.used_ransac == true);
+}
 // v2.9 (TDD 红→绿): **重力约束的地面拟合**
 //   动机: 实机地板补丁极小(0.1~0.3 m², 21~76 格)且掠射 ⇒ 自由 3 自由度平面拟合的
 //         法向不可信(实测 tilt 8.8~14.3° 乱跳、RMS 2~5cm、支撑/残差守门全过不了)。
@@ -546,6 +581,7 @@ int main() {
     test_cell_min_fit_enforces_tilt_and_prior();                  // v2.7
     test_cell_min_fit_yawed_floor();                              // v2.7: 偏航位形
     test_cell_min_fit_lower_envelope_beats_dense_upper_surface();  // v2.7: 单边下包络
+    test_cell_skip_ransac_keeps_cell_plane();                      // v2.9.16: cell 成功跳过 RANSAC
     std::cout << "=== ground segmentation tests ===" << std::endl;
     test_baseline_flat_ground();
     test_pit_detected();

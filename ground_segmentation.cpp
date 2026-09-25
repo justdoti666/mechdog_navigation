@@ -239,58 +239,68 @@ void segment_ground(const PointCloud& cloud, const GroundSegParams& p,
     if (p.use_cell_min_fit) {
         have_plane = fit_ground_plane_cells(cloud, p, plane);
     }
+    out.used_cell = have_plane;   // v2.9.16: 日志/真机核查用 (见 GroundSegResult)
 
-    // ---- ① 受约束 RANSAC 拟合地面平面 ----
-    // 候选预过滤: 地面点只可能出现在先验带及其下方 ~1m 内 (容忍先验偏差/坑底),
-    // 高处点(墙/桌)不参与采样 —— 提高命中率并省算力.
-    std::vector<int> cand;
-    cand.reserve(static_cast<size_t>(n));
-    for (int i = 0; i < n; ++i) {
-        const double z = pts[i].z;
-        if (z <= p.ground_prior_z + p.prior_window &&
-            z >= p.ground_prior_z - p.prior_window - 1.0) {
-            cand.push_back(i);
+    // ---- ① 受约束 RANSAC 拟合地面平面 (v2.9.16: cell 成功时整段跳过) ----
+    // ★ 2026-09-25 师兄口径: ⓪ 的确定性 cell 拟合成功, 且 cell_skip_ransac=true(默认) 时,
+    //   不再跑 RANSAC。旧行为 = cell 之后仍无条件跑满 RANSAC 并**覆盖**:
+    //     费时 —— 真机 11~16ms/帧, 感知链最大头;
+    //     且把更准的 cell 结果改坏 —— 合成真值: cell 单独 0.02° vs 覆盖后 0.98~1.39°。
+    //   cell 失败(或 use_cell_min_fit=false)时行为与历史一致, 仍由 RANSAC 兜底。
+    //   置 cell_skip_ransac=false 可回到旧行为 (供 A/B / 排查; 单测见 test_cell_skip_ransac_*)。
+    const bool run_ransac = !(have_plane && p.cell_skip_ransac);
+    if (run_ransac) {
+        // 候选预过滤: 地面点只可能出现在先验带及其下方 ~1m 内 (容忍先验偏差/坑底),
+        // 高处点(墙/桌)不参与采样 —— 提高命中率并省算力.
+        std::vector<int> cand;
+        cand.reserve(static_cast<size_t>(n));
+        for (int i = 0; i < n; ++i) {
+            const double z = pts[i].z;
+            if (z <= p.ground_prior_z + p.prior_window &&
+                z >= p.ground_prior_z - p.prior_window - 1.0) {
+                cand.push_back(i);
+            }
         }
-    }
 
-    const double cos_max_tilt = std::cos(p.plane_max_tilt_deg * kDegToRad);
-    // 最少内点数: 过少的空间_patch不配叫"地面" (防止把 3 个孤立噪点拟合成平面)
-    // 内点域已收窄到候选集 (下方扫描), 基线随候选集规模同步, 保留"空间 patch 最小规模"语义
-    const int min_inliers = std::max(30, static_cast<int>(cand.size()) / 50);
+        const double cos_max_tilt = std::cos(p.plane_max_tilt_deg * kDegToRad);
+        // 最少内点数: 过少的空间_patch不配叫"地面" (防止把 3 个孤立噪点拟合成平面)
+        // 内点域已收窄到候选集 (下方扫描), 基线随候选集规模同步, 保留"空间 patch 最小规模"语义
+        const int min_inliers = std::max(30, static_cast<int>(cand.size()) / 50);
 
-    if (static_cast<int>(cand.size()) >= 3) {
-        std::mt19937 rng(p.seed);
-        std::uniform_int_distribution<int> pick(0, static_cast<int>(cand.size()) - 1);
-        GroundPlane best;
-        for (int it = 0; it < p.ransac_max_iters; ++it) {
-            const int i1 = cand[pick(rng)], i2 = cand[pick(rng)], i3 = cand[pick(rng)];
-            if (i1 == i2 || i2 == i3 || i1 == i3) continue;
-            double nx, ny, nz, d;
-            if (!plane_from_three(pts[i1], pts[i2], pts[i3], nx, ny, nz, d)) continue;
-            if (nz < 0.0) { nx = -nx; ny = -ny; nz = -nz; d = -d; }  // 法向统一朝上
-            if (nz < cos_max_tilt) continue;                          // 倾角约束 (nz=cos(tilt))
-            const double h0 = -d / nz;                                // 原点处平面高度
-            if (std::abs(h0 - p.ground_prior_z) > p.prior_window) continue;  // 高度先验约束
+        if (static_cast<int>(cand.size()) >= 3) {
+            std::mt19937 rng(p.seed);
+            std::uniform_int_distribution<int> pick(0, static_cast<int>(cand.size()) - 1);
+            GroundPlane best;
+            for (int it = 0; it < p.ransac_max_iters; ++it) {
+                const int i1 = cand[pick(rng)], i2 = cand[pick(rng)], i3 = cand[pick(rng)];
+                if (i1 == i2 || i2 == i3 || i1 == i3) continue;
+                double nx, ny, nz, d;
+                if (!plane_from_three(pts[i1], pts[i2], pts[i3], nx, ny, nz, d)) continue;
+                if (nz < 0.0) { nx = -nx; ny = -ny; nz = -nz; d = -d; }  // 法向统一朝上
+                if (nz < cos_max_tilt) continue;                          // 倾角约束 (nz=cos(tilt))
+                const double h0 = -d / nz;                                // 原点处平面高度
+                if (std::abs(h0 - p.ground_prior_z) > p.prior_window) continue;  // 高度先验约束
 
-            int inl = 0;
-            for (int i : cand) {   // 内点统计域: 全点 n → 候选集 (采样域=内点域, 语义一致, ~2x 提速)
-                const auto& q = pts[i];
-                if (std::abs(nx * q.x + ny * q.y + nz * q.z + d) <= p.ransac_inlier_dist) {
-                    ++inl;
+                int inl = 0;
+                for (int i : cand) {   // 内点统计域: 全点 n → 候选集 (采样域=内点域, 语义一致, ~2x 提速)
+                    const auto& q = pts[i];
+                    if (std::abs(nx * q.x + ny * q.y + nz * q.z + d) <= p.ransac_inlier_dist) {
+                        ++inl;
+                    }
+                }
+                if (inl > best.inliers) {
+                    best.valid = true;
+                    best.nx = nx; best.ny = ny; best.nz = nz; best.d = d;
+                    best.inliers = inl;
+                }
+                if (best.inliers >= min_inliers &&
+                    static_cast<double>(best.inliers) / n >= p.ransac_early_ratio) {
+                    break;  // 内点率达标, 提前退出
                 }
             }
-            if (inl > best.inliers) {
-                best.valid = true;
-                best.nx = nx; best.ny = ny; best.nz = nz; best.d = d;
-                best.inliers = inl;
-            }
-            if (best.inliers >= min_inliers &&
-                static_cast<double>(best.inliers) / n >= p.ransac_early_ratio) {
-                break;  // 内点率达标, 提前退出
-            }
-        }
 
-        if (best.valid && best.inliers >= min_inliers) { plane = best; have_plane = true; }
+            if (best.valid && best.inliers >= min_inliers) { plane = best; have_plane = true; out.used_ransac = true; }
+        }
     }
 
     if (have_plane) {
