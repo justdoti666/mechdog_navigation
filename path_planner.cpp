@@ -6,6 +6,15 @@
 namespace mechdog {
 
 VelocityCmd PathPlanner::plan(const FusionResult& fusion) {
+    // A2 (v2.9.19, 复审批): STOP / REACHED_GOAL **直达零速**, 不受 ramp 限幅。
+    //   旧版连 STOP 也过 ramp: 从 0.2 m/s 降到零需 4 个 200ms 周期(实测非零窗口
+    //   ~600ms / 到零 ~800ms / 滑行 ~6.8cm) —— 急停场景多滑行数厘米。急停优先于平滑。
+    if (fusion.recommended_action == NavigationAction::STOP ||
+        fusion.recommended_action == NavigationAction::REACHED_GOAL) {
+        last_linear_  = 0.0;    // 同步清零 ramp 状态: 下次起步从零重新步进
+        last_angular_ = 0.0;
+        return {0.0, 0.0};
+    }
     VelocityCmd target = action_to_cmd(fusion.recommended_action);
     // ALG-6 (v2.2): 速度 ramp —— 用闲置的 linear_accel/angular_accel 一阶限幅,
     // 消除 FORWARD→STOP→BACKWARD 瞬时跳变。safety_node timer 5Hz, dt=0.2s。

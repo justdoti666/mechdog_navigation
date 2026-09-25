@@ -121,6 +121,12 @@ target_include_directories(test_heightmap_2d5 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 target_link_libraries(test_heightmap_2d5 PRIVATE Threads::Threads)
 add_test(NAME heightmap_2d5_tests COMMAND test_heightmap_2d5)
 
+# 路径规划单测 (A2, v2.9.19): STOP/REACHED_GOAL 直达零速 + ramp 回归
+add_executable(test_path_planner tests/test_path_planner.cpp path_planner.cpp)
+target_include_directories(test_path_planner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_path_planner PRIVATE Threads::Threads)
+add_test(NAME path_planner_tests COMMAND test_path_planner)
+
 # 真机建图验证工具 (P4, 仅 USE_ASTRA_SDK 模式编译, Windows 侧运行)
 if(USE_ASTRA_SDK)
     add_executable(mapping_real_test tools/mapping_real_test.cpp

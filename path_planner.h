@@ -32,6 +32,7 @@ private:
 
     // ALG-6 (v2.2): 速度 ramp —— 用闲置的 linear_accel/angular_accel 一阶限幅,
     // 消除 FORWARD→STOP→BACKWARD 瞬时跳变。step 限幅: |target-last| <= accel*dt。
+    // A2 (v2.9.19): STOP/REACHED_GOAL 例外 —— 直达零速(急停不受限幅), 见 .cpp。
     static double clamp_step(double target, double last, double max_delta);
 
     double last_linear_  = 0.0;  // 上一帧输出 (ramp 状态)
