@@ -42,14 +42,14 @@
 | 红外强度驱动 | `sensor_ir.h/.cpp` | TSL2591 环境红外检测，用于环境自适应权重（含模拟模式） |
 | 传感器融合 | `sensor_fusion.h/.cpp` | 分层加权融合、环境自适应、障碍物分类、导航决策 |
 | 点云模块 | `point_cloud.h/.cpp` | 深度图→3D 点云反投影、光学系→link 系坐标变换（P0，供规划/建图预留，独立于融合层） |
-| 地面分割 | `ground_segmentation.h/.cpp` | 受约束 RANSAC 地面平面 + 2.5D 栅格**负障碍检测**（坑/下行台阶，P1；门口试金石单测锁定） |
+| 地面分割 | `ground_segmentation.h/.cpp` | 受约束 RANSAC 地面平面（可选 `cell` 确定性最小拟合；`cell_skip_ransac` 默认让 cell 成功时跳过 RANSAC，v2.9.16）+ 2.5D 栅格**负障碍检测**（坑/下行台阶，P1；门口试金石单测锁定） |
 | 建图模块 | `mapping.h/.cpp` | 位姿驱动点云累积 → log-odds 占据栅格 + 光线空闲 + 膨胀 + PGM 导出（P4） |
 | 2.5D 近场地形 | `heightmap_2d5.h/.cpp` | 单平面 2.5D 高程/可通行地形 → 越障判断（能走/凸起/沟坑/太陡，P1.5；复用 P1 地面平面） |
 | 日志系统 | `logger.h` | 分级日志 DEBUG/INFO/WARN/ERROR + 时间戳 + 可选写文件（header-only，零依赖） |
 | 路径规划 | `path_planner.h/.cpp` | 导航动作 -> 速度指令映射（DWA 待实现） |
 | 单元测试 | `tests/test_fusion.cpp` | F4/F5 回归 + 融合逻辑验证 (`ctest`) |
 | 点云单测 | `tests/test_point_cloud.cpp` | 反投影/坐标变换/失效哨兵验证 (`ctest`，P0) |
-| 地面分割单测 | `tests/test_ground_segmentation.cpp` | 平地/坑/台阶/门口试金石/倾斜/退化输入 (`ctest`，P1) |
+| 地面分割单测 | `tests/test_ground_segmentation.cpp` | 平地/坑/台阶/门口试金石/倾斜/退化输入/`cell_skip_ransac` 新旧行为（`ctest`，P1） |
 | 建图单测 | `tests/test_mapping.cpp` | 坐标换算/占空判定/位姿变换/多帧累积/动态清障/膨胀/PGM (`ctest`，P4，40 断言) |
 | 2.5D 单测 | `tests/test_heightmap_2d5.cpp` | 平地/凸起台阶/沟坑/fail-closed (`ctest`，P1.5) |
 | 真机建图工具 | `tools/mapping_real_test.cpp` | Windows 真机验证工具：Astra 真深度→全管线→PGM（静止校验 + 旋转扫描模式） |
