@@ -64,8 +64,19 @@ UltrasonicSensor::UltrasonicSensor(const std::string& name, int trig_pin, int ec
       rng_(std::random_device{}())
 {
 #ifdef USE_WIRINGPI
-    setup_gpio();
-    hw_available_ = true;   // 编译进了 GPIO 支持 (注: 原实现不检查 wiringPiSetup 返回值)
+    // A1 (v2.9.19, 复审批): 先初始化 wiringPi 并检查返回值 —— 旧版从不调用 wiringPiSetup*()
+    // 就置 hw_available_=true: 真机上 pinMode/digitalRead 全在未初始化状态, 且
+    // is_hardware_available() 对外声称"硬件可用" ⇒ 上层拒绝模拟兜底却拿到垃圾读数。
+    // 引脚为 BCM 编号 (config.h 布局注释) ⇒ 用 wiringPiSetupGpio() 对应其编号体系。
+    // 失败(无权限 / 无 /dev/gpiomem / 机型不支持) ⇒ 诚实降级, 交给上层来源解析。
+    if (wiringPiSetupGpio() == -1) {
+        std::cout << "[超声] wiringPiSetupGpio 失败(权限/GPIO 未就绪/机型不支持)"
+                     " ⇒ 本传感器降级为不可用" << std::endl;
+        hw_available_ = false;
+    } else {
+        setup_gpio();
+        hw_available_ = true;
+    }
 #else
     std::cout << "[超声] RPi.GPIO 不可用，使用模拟模式" << std::endl;
 #endif
