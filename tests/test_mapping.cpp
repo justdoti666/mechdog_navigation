@@ -16,6 +16,7 @@
 #endif
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -406,7 +407,9 @@ int main() {
         Pose2D pose;
         m.insert_cloud(make_cloud_base({{2.0, 0.0}}), pose);
         m.inflate(0.15);
-        const std::string path = "/tmp/mechdog_map_test.pgm";
+        // v2.9.18: 可移植临时目录 (Windows 无 /tmp, 原硬编码导致本机 5 项失败)
+        const std::string tmpdir = std::filesystem::temp_directory_path().string();
+        const std::string path = tmpdir + "/mechdog_map_test.pgm";
         CHECK(m.save_pgm(path));
 
         // 读回验证: 头部 + 特征像素
@@ -433,18 +436,21 @@ int main() {
         Pose2D pose;
         m.insert_cloud(make_cloud_base({{2.0, 0.0}}), pose);
 
-        // save_nav2_map: 一次出 pgm+yaml 成对文件
-        CHECK(m.save_nav2_map("/tmp/mechdog_nav2_test"));
+        // save_nav2_map: 一次出 pgm+yaml 成对文件 (v2.9.18: 临时目录可移植)
+        const std::string tmpdir = std::filesystem::temp_directory_path().string();
+        const std::string base   = tmpdir + "/mechdog_nav2_test";
+        CHECK(m.save_nav2_map(base));
 
         // --- yaml 内容: nav2 map_server 必需五字段 ---
-        std::FILE* f = std::fopen("/tmp/mechdog_nav2_test.yaml", "rb");
+        std::FILE* f = std::fopen((base + ".yaml").c_str(), "rb");
         CHECK(f != nullptr);
         if (f) {
             char buf[512] = {0};
             const size_t rd = std::fread(buf, 1, 511, f);
             std::fclose(f);
             (void)rd;
-            CHECK(std::strstr(buf, "image: /tmp/mechdog_nav2_test.pgm") != nullptr);
+            const std::string want_img = "image: " + base + ".pgm";
+            CHECK(std::strstr(buf, want_img.c_str()) != nullptr);
             CHECK(std::strstr(buf, "resolution: 0.050000") != nullptr);
             CHECK(std::strstr(buf, "origin: [-5.000000, -5.000000, 0.000000]") != nullptr);
             CHECK(std::strstr(buf, "negate: 0") != nullptr);
@@ -453,7 +459,7 @@ int main() {
         }
 
         // --- PGM 是 P5 (二进制), 像素数 = w*h ---
-        std::FILE* g = std::fopen("/tmp/mechdog_nav2_test.pgm", "rb");
+        std::FILE* g = std::fopen((base + ".pgm").c_str(), "rb");
         CHECK(g != nullptr);
         if (g) {
             char magic[3] = {0};
