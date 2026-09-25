@@ -50,7 +50,7 @@
 | 单元测试 | `tests/test_fusion.cpp` | F4/F5 回归 + 融合逻辑验证 (`ctest`) |
 | 点云单测 | `tests/test_point_cloud.cpp` | 反投影/坐标变换/失效哨兵验证 (`ctest`，P0) |
 | 地面分割单测 | `tests/test_ground_segmentation.cpp` | 平地/坑/台阶/门口试金石/倾斜/退化输入/`cell_skip_ransac` 新旧行为（`ctest`，P1） |
-| 建图单测 | `tests/test_mapping.cpp` | 坐标换算/占空判定/位姿变换/多帧累积/动态清障/膨胀/PGM (`ctest`，P4，40 断言) |
+| 建图单测 | `tests/test_mapping.cpp` | 坐标换算/占空判定/位姿变换/多帧累积/动态清障/膨胀/PGM (`ctest`，P4，113 运行期断言) |
 | 2.5D 单测 | `tests/test_heightmap_2d5.cpp` | 平地/凸起台阶/沟坑/fail-closed (`ctest`，P1.5) |
 | 真机建图工具 | `tools/mapping_real_test.cpp` | Windows 真机验证工具：Astra 真深度→全管线→PGM（静止校验 + 旋转扫描模式） |
 
@@ -132,7 +132,7 @@ map.inflate();          // 可选: 规划前膨胀
 map.save_pgm("map.pgm");
 ```
 
-`Pose2D` 由 ROS 层从 `nav_msgs/Odometry` 提取——算法库零 ROS 依赖，单测全部离线可跑（40 断言：坐标换算/空帧安全/占空判定/位姿变换/多帧累积/动态清障/膨胀/PGM）。
+`Pose2D` 由 ROS 层从 `nav_msgs/Odometry` 提取——算法库零 ROS 依赖，单测全部离线可跑（113 运行期断言：坐标换算/空帧安全/占空判定/位姿变换/多帧累积/动态清障/膨胀/PGM）。
 
 ### 真机建图验证（Windows 工具）
 
@@ -279,8 +279,11 @@ cmake --build . --target test_fusion test_point_cloud
 ctest --output-on-failure
 ```
 
-- `test_fusion` — 融合层回归（677 断言）
-- `test_point_cloud` — 点云模块 P0（反投影几何/内参/坐标变换/失效哨兵/轴约定，12 测试函数，30 万+ 断言）
+- `test_fusion` — 融合层回归（732 运行期断言）
+- `test_point_cloud` — 点云模块 P0（反投影几何/内参/坐标变换/失效哨兵/轴约定，12 测试函数，30.7 万运行期断言）
+- `test_ground_segmentation` — 地面分割（153 运行期断言）/ `test_mapping` — 建图（113）/ `test_heightmap_2d5` — 2.5D（51）
+
+> 断言数为**运行期计数**口径（WSL/Windows 两平台均 0 失败）；与"行首 CHECK 字面行数"是两套口径，引用时勿混用。
 
 ## 构建
 
