@@ -343,6 +343,10 @@ AstraFrame AstraProDriver::simulate_frame() {
         }
     }
 
+    // v2.9.18 (N7): 补上精确有效像素数 —— 此前恒 0 ⇒ 节点深度质量守门永远判"未就绪"
+    //   ⇒ 模拟模式(PC 演练)地形层恒 abstain。口径与 capture_real 一致(600~8000mm)。
+    frame.valid_pixel_count = count_valid_pixels(frame.depth_map);
+
     // 环境: 置 UNKNOWN, 让 determine_environment() 走红外模拟值 fallback,
     // 使室内/半室内/室外三档在模拟中均可验证 (FIX-2)
     // (ALG-3 v2.2: 已删除 ambient_light_level 字段, 此处不再写死值)
