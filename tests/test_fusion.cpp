@@ -974,6 +974,65 @@ static void test_ultrasonic_disabled_removes_cliff_layer() {
     CHECK(r3.recommended_action == NavigationAction::STOP);
 }
 
+
+// ===== S1 (N2): 退化期降级链 (2026-09-26) =====
+// 降级期间三级反应线收紧: 10/25/50 -> 20/40/70cm (超声与融合两套阶梯同口径);
+// 未降级 (默认) 与接入前逐位一致。先红后绿: 实现前"降级"一侧的断言全部失败。
+static void test_degraded_ladder_tightened() {
+    AstraProDriver astra(true);
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    InfraRedSensor ir(true);
+    SensorFusion fusion(&astra, &ultrasonic, &ir);
+    std::unordered_map<std::string, FusedObstacle> none;
+    // 超声 18cm: 基线 BACKWARD (<=25) vs 降级 STOP (<=20)
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 18.0, false, none, true, true)
+          == NavigationAction::BACKWARD);
+    fusion.set_depth_degraded(true);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 18.0, false, none, true, true)
+          == NavigationAction::STOP);
+    // 超声 30cm: 基线不触发 (30>25, 融合远) -> FORWARD; 降级 <=40 -> BACKWARD
+    fusion.set_depth_degraded(false);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 30.0, false, none, true, true)
+          == NavigationAction::FORWARD);
+    fusion.set_depth_degraded(true);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 30.0, false, none, true, true)
+          == NavigationAction::BACKWARD);
+    // 复原: 置回 false 与基线一致 (自动解除由胶水包驱动; 此处验证状态可逆)
+    fusion.set_depth_degraded(false);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 18.0, false, none, true, true)
+          == NavigationAction::BACKWARD);
+}
+
+static void test_degraded_fused_ladder_and_choose_direction() {
+    AstraProDriver astra(true);
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    InfraRedSensor ir(true);
+    SensorFusion fusion(&astra, &ultrasonic, &ir);
+    auto mk3 = [](double l, double c, double r) {
+        std::unordered_map<std::string, FusedObstacle> m;
+        for (auto kv : {std::make_pair("left", l), std::make_pair("center", c), std::make_pair("right", r)}) {
+            FusedObstacle o; o.direction = kv.first; o.distance_m = kv.second; m[kv.first] = o;
+        }
+        return m;
+    };
+    std::unordered_map<std::string, FusedObstacle> none;
+    // 融合 0.60m (基线 60>50 -> FORWARD); 降级 (<=70) -> 选向: 中心 0.60<0.70 -> 右比较 -> TURN_RIGHT
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 0.60, 400.0, false, none, true, true)
+          == NavigationAction::FORWARD);
+    fusion.set_depth_degraded(true);
+    auto obs60 = mk3(0.60, 0.60, 0.60);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 0.60, 400.0, false, obs60, true, true)
+          == NavigationAction::TURN_RIGHT);
+    // 全 0.35m: 基线 -> TURN_RIGHT (右 >25cm); 降级 -> BACKWARD (右 <=40cm 不达转向线)
+    fusion.set_depth_degraded(false);
+    auto obs35 = mk3(0.35, 0.35, 0.35);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 0.35, 400.0, false, obs35, true, true)
+          == NavigationAction::TURN_RIGHT);
+    fusion.set_depth_degraded(true);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 0.35, 400.0, false, obs35, true, true)
+          == NavigationAction::BACKWARD);
+}
+
 int main() {
     test_cliff_valid_check();
     test_min_forward_valid_filter();
@@ -999,6 +1058,8 @@ int main() {
     test_terrain_corridor_bounds_and_negative_points();  // 路1: 走廊边界 + 负障碍点
     test_terrain_threshold_edges();             // 路1: 边界对加固(#4)
     test_ultrasonic_disabled_removes_cliff_layer();      // v2.5: 超声链路可禁用 (真机无硬件)
+    test_degraded_ladder_tightened();                    // S1 (N2): 降级阈值收紧
+    test_degraded_fused_ladder_and_choose_direction();   // S1 (N2): 融合阶梯 + 选向收紧
 
     std::cout << "passed=" << g_passed << " failed=" << g_failed << std::endl;
     return g_failed == 0 ? 0 : 1;

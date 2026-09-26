@@ -61,6 +61,8 @@ struct FusionResult {
     double effective_ultrasonic_weight          = 0.0;
     NavigationAction recommended_action        = NavigationAction::FORWARD;
     double min_forward_distance_m              = 8.0;
+    // S1 (N2): 深度降级期标记 (由胶水包按口径② streak 驱动; false = 接入前行为)
+    bool   depth_degraded                      = false;
     // 路1: 近场地形避障 (P1/P1.5 → 决策)。未注入地形时三者恒为 false/false/0 ——
     // 与接入前逐位一致 (回归安全)。
     bool   terrain_block_near = false;  // 前方 0.4~1.2m 走廊内有坑/台阶 (STOP 级)
@@ -106,6 +108,14 @@ public:
     void set_ultrasonic_enabled(bool on) { ultrasonic_enabled_ = on; }
     bool ultrasonic_enabled() const { return ultrasonic_enabled_; }
 
+    /**
+     * S1 (N2): 深度降级期开关 (由胶水包按口径② streak 状态驱动, 与超声开关同为安全链路开关)。
+     * on=true: 决策侧三级反应线收紧 (DegradedPolicyConfig), planner 侧前进限速 ≤SLOW。
+     * 恢复由调用方置回 false; 默认 false ⇒ 与接入前行为逐位一致 (回归安全)。
+     */
+    void set_depth_degraded(bool on) { depth_degraded_ = on; }
+    bool depth_degraded() const { return depth_degraded_; }
+
 private:
     // 单元测试访问 (tests/test_fusion.cpp 专用, R-3: 测试调用真函数而非复刻逻辑)
     friend class SensorFusionTestAccess;
@@ -119,6 +129,8 @@ private:
     bool   terrain_mid_       = false; // 中距 (1.2~2.0m) 命中禁行地形
     // v2.5: 超声链路开关 (false = 不读超声/不作悬崖判定; 上层在无硬件或无数据源时置 false)
     bool   ultrasonic_enabled_ = true;
+    // S1 (N2): 降级链开关 (由 set_depth_degraded 驱动)
+    bool   depth_degraded_ = false;
     double terrain_x_         = 0.0;   // 最近命中处 x (诊断)
     // ---- v2.9 路1 细分 (按标签分级) ----
     // 证据: 实机 181 帧 STOP 124 / FORWARD 57 ⇒ "近场凸起一律 STOP" 被证伪 (见 config.h

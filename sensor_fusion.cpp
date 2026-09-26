@@ -82,6 +82,8 @@ FusionResult SensorFusion::fuse() {
     result.recommended_action = determine_action(
         result.min_forward_distance_m, min_ultrasonic_cm, result.cliff_detected,
         result.obstacles, result.sensors_valid, front_valid);
+    // S1 (N2): 透出降级标记 (planner 据此限速; JSON/日志可观测)
+    result.depth_degraded = depth_degraded_;
 
     return result;
 }
@@ -371,22 +373,31 @@ NavigationAction SensorFusion::determine_action(
         return NavigationAction::SLOW_FORWARD;
     }
 
+    // S1 (N2): 降级期三级反应线收紧 (10/25/50 → 20/40/70cm); 未降级 = 原值, 逐位一致。
+    //   超声与融合两套阶梯同口径 —— "退化期有超声数据就按收紧后的线取近"。
+    const double stop_cm = depth_degraded_ ? DegradedPolicyConfig::stop_cm
+                                           : EmergencyConfig::critical_dist_cm;
+    const double back_cm = depth_degraded_ ? DegradedPolicyConfig::backward_cm
+                                           : EmergencyConfig::warning_dist_cm;
+    const double turn_cm = depth_degraded_ ? DegradedPolicyConfig::turn_cm
+                                           : EmergencyConfig::safe_dist_cm;
+
     // 超声波独立紧急检查
-    if (min_ultrasonic_cm <= EmergencyConfig::critical_dist_cm) {
+    if (min_ultrasonic_cm <= stop_cm) {
         return NavigationAction::STOP;
     }
-    if (min_ultrasonic_cm <= EmergencyConfig::warning_dist_cm) {
+    if (min_ultrasonic_cm <= back_cm) {
         return NavigationAction::BACKWARD;
     }
 
     // 融合距离判断
     double dist_cm = min_forward_m * 100;
 
-    if (dist_cm <= EmergencyConfig::critical_dist_cm) {
+    if (dist_cm <= stop_cm) {
         return NavigationAction::STOP;
-    } else if (dist_cm <= EmergencyConfig::warning_dist_cm) {
+    } else if (dist_cm <= back_cm) {
         return NavigationAction::BACKWARD;
-    } else if (dist_cm <= EmergencyConfig::safe_dist_cm) {
+    } else if (dist_cm <= turn_cm) {
         return choose_direction(obstacles);
     } else {
         // 路1: 中距 (1.2~2.0m) 有坑/台阶 —— 至少降速; 明显偏一侧则向对侧让开。
@@ -424,26 +435,32 @@ NavigationAction SensorFusion::choose_direction(
         return NavigationAction::SLOW_FORWARD;
     }
 
+    // S1 (N2): 选向参考线跟随降级收紧 (50→70 / 25→40cm); 未降级 = 原值。
+    const double turn_m = (depth_degraded_ ? DegradedPolicyConfig::turn_cm
+                                           : EmergencyConfig::safe_dist_cm) / 100.0;
+    const double back_m = (depth_degraded_ ? DegradedPolicyConfig::backward_cm
+                                           : EmergencyConfig::warning_dist_cm) / 100.0;
+
     // 中央有效且开阔 -> 缓行 (A1: 中央盲区时不得据此缓行)
-    if (center_ok && center_dist > EmergencyConfig::safe_dist_cm / 100.0) {
+    if (center_ok && center_dist > turn_m) {
         return NavigationAction::SLOW_FORWARD;
     }
 
     // 在有效方向中选择较开阔侧转向 (A1: 只比较有效方向, 退出优先)
     if (left_ok && right_ok) {
-        if (left_dist > right_dist && left_dist > EmergencyConfig::warning_dist_cm / 100.0) {
+        if (left_dist > right_dist && left_dist > back_m) {
             return NavigationAction::TURN_LEFT;
         }
-        if (right_dist > EmergencyConfig::warning_dist_cm / 100.0) {
+        if (right_dist > back_m) {
             return NavigationAction::TURN_RIGHT;
         }
         return NavigationAction::BACKWARD;
     }
     // 单侧有效: 仅依据该侧; 无效侧不参与抉择
-    if (left_ok && left_dist > EmergencyConfig::warning_dist_cm / 100.0) {
+    if (left_ok && left_dist > back_m) {
         return NavigationAction::TURN_LEFT;
     }
-    if (right_ok && right_dist > EmergencyConfig::warning_dist_cm / 100.0) {
+    if (right_ok && right_dist > back_m) {
         return NavigationAction::TURN_RIGHT;
     }
     return NavigationAction::BACKWARD;

@@ -142,6 +142,24 @@ struct EmergencyConfig {
 };
 
 // ============================================================
+// 退化期降级链 (S1, N2 兜底): 深度降级期间的行为策略
+// ============================================================
+// 背景 (N2): 部分坏帧 (valid≈24%) 时前向零星像素仍被判"看得见" ⇒ 融合可能给 FORWARD
+//   全速; 口径② 只上报不动作。S1 = 降级期间的动作层兜底:
+//     ① 前进类速度 ≤ speed_scale (SLOW 档)   —— path_planner 消费 FusionResult.depth_degraded
+//     ② 三级反应线整体前移 (10/25/50 → stop/backward/turn cm), 超声与融合两套阶梯同口径
+//     ③ "取近": 超声经既有融合回落照常参与 (雷达扇区 = S2, 待现场确认后接)
+//     ④ 好帧自动解除 (胶水包把口径② streak 状态驱动 set_depth_degraded)
+//   方向 = 更保守 (更早减速/停车/后退); 代价 = 误报时更频繁减速 — 数值待长跑误报率
+//   数据 + 会签定稿 (2026-09-26 初始保守提案: 反应线前移约一个机身段)。
+struct DegradedPolicyConfig {
+    static constexpr double speed_scale  = 0.5;   // 前进类速度上限 = 50% v_max (= SLOW 档)
+    static constexpr double stop_cm      = 20.0;  // 原 critical 10cm (STOP)
+    static constexpr double backward_cm  = 40.0;  // 原 warning  25cm (BACKWARD)
+    static constexpr double turn_cm      = 70.0;  // 原 safe     50cm (TURN/选向 分界)
+};
+
+// ============================================================
 // 近场地形避障 (P1 地面分割 + P1.5 2.5D → 融合决策) —— "路1"
 // ============================================================
 // 背景: P1 的负障碍点 (GroundSegResult::negative_points) 与 P1.5 的 2.5D 禁行格

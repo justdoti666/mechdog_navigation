@@ -7,6 +7,8 @@
  *   T4 平滑不回归: FORWARD 步进 / FORWARD→SLOW_FORWARD 仍按 max_dv 限幅(不跳变)。
  *   T5 REACHED_GOAL: 同样直达零速。
  *   T6 角速度: TURN 仍 ramp; STOP 时角速度也立即归零。
+ *   T7-T9 S1 (N2): 退化期限速 —— FORWARD 封顶 SLOW 档(v_max*0.5); STOP 仍直达零速;
+ *        解除(好帧)后能升回 v_max。
  */
 #include "path_planner.h"
 
@@ -90,6 +92,46 @@ static void test_angular_ramp_and_stop() {
     CHECK(std::fabs(c.linear) < kEps);
 }
 
+
+// ===== S1 (N2): 退化期限速 (2026-09-26) =====
+// T7: 降级期 FORWARD 封顶 SLOW 档 (v_max*0.5=0.10), 不再升到 0.20
+static void test_degraded_speed_cap() {
+    PathPlanner p;
+    FusionResult fr = with_action(NavigationAction::FORWARD);
+    fr.depth_degraded = true;
+    const double cap = PlannerConfig::max_linear_velocity * DegradedPolicyConfig::speed_scale;
+    VelocityCmd c;
+    for (int i = 0; i < 8; ++i) {
+        c = p.plan(fr);
+        CHECK(c.linear <= cap + kEps);              // 全程不越限
+    }
+    CHECK(std::fabs(c.linear - cap) < 1e-9);        // 稳态 = 0.10 (未降级时为 0.20)
+}
+
+// T8: 降级期 STOP 仍直达零速 (急停优先于任何限速)
+static void test_degraded_stop_still_immediate() {
+    PathPlanner p;
+    FusionResult fwd = with_action(NavigationAction::FORWARD);
+    fwd.depth_degraded = true;
+    for (int i = 0; i < 6; ++i) p.plan(fwd);
+    FusionResult st = with_action(NavigationAction::STOP);
+    st.depth_degraded = true;
+    VelocityCmd c = p.plan(st);
+    CHECK(std::fabs(c.linear) < kEps && std::fabs(c.angular) < kEps);
+}
+
+// T9: 恢复后 FORWARD 升回 v_max (解除即复原)
+static void test_degraded_release_restores() {
+    PathPlanner p;
+    FusionResult fr = with_action(NavigationAction::FORWARD);
+    fr.depth_degraded = true;
+    for (int i = 0; i < 8; ++i) p.plan(fr);
+    fr.depth_degraded = false;
+    VelocityCmd c;
+    for (int i = 0; i < 4; ++i) c = p.plan(fr);
+    CHECK(std::fabs(c.linear - PlannerConfig::max_linear_velocity) < kEps);
+}
+
 int main() {
     std::cout << "== path planner (A2) tests ==" << std::endl;
     test_stop_is_immediate();
@@ -98,6 +140,9 @@ int main() {
     test_ramp_smoothness_kept();
     test_reached_goal_is_immediate();
     test_angular_ramp_and_stop();
+    test_degraded_speed_cap();          // S1: 降级限速
+    test_degraded_stop_still_immediate(); // S1: 急停不受限速影响
+    test_degraded_release_restores();     // S1: 解除复原
     std::cout << "\n" << g_checks << " checks, " << g_fail << " failed\n" << std::endl;
     return g_fail ? 1 : 0;
 }
