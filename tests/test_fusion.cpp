@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <set>
 #include <thread>
 
@@ -1033,6 +1034,51 @@ static void test_degraded_fused_ladder_and_choose_direction() {
           == NavigationAction::BACKWARD);
 }
 
+// v2.9.21 (T-B3, 复审批 B11): NaN/inf 超声注入必须被**消毒** —— 非有限值不得进入安全链。
+//   旧版: 注入 NaN 且 valid=true 时原样透传; 底部 NaN 会被 get_cliff_detected 判"无风险"
+//   (比较全 false = fail-open), classify 判 SAFE。修复: 注入时消毒 (非有限 ⇒ valid=false+量程值),
+//   且 get_min/cliff 聚合再加 isfinite 双保险。
+static void test_nan_ultrasonic_sanitized() {
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    const double nan_v = std::numeric_limits<double>::quiet_NaN();
+
+    UltrasonicArrayData d;
+    d.front_left.valid  = true; d.front_left.distance_cm  = 25.0;
+    d.front_center.valid = true; d.front_center.distance_cm = nan_v;   // 坏数据源
+    d.front_right.valid = true; d.front_right.distance_cm = 30.0;
+    d.bottom.valid = true;      d.bottom.distance_cm = 15.0;
+    ultrasonic.inject_external_data(d);
+    UltrasonicArrayData back = ultrasonic.read_all();
+    CHECK(back.front_center.valid == false);                    // 消毒: NaN -> 无效
+    CHECK(std::isfinite(back.front_center.distance_cm));        // 且数值有限 (400 兜底)
+    CHECK(std::fabs(back.get_min_forward_distance_cm() - 25.0) < 1e-9);  // NaN 不影响 min
+    CHECK(ultrasonic.is_fall_risk() == false);                  // bottom 15cm 正常安全
+
+    // 底部 NaN -> 消毒为无效 -> fail-closed 有风险 (旧版 NaN 比较全 false -> 误判安全)
+    UltrasonicArrayData d2;
+    d2.bottom.valid = true; d2.bottom.distance_cm = nan_v;
+    ultrasonic.inject_external_data(d2);
+    CHECK(ultrasonic.is_fall_risk() == true);
+}
+
+// v2.9.21 (T-B3, 复审批 B11): classify_obstacle_level 对非有限输入必须判最危险档
+//   (旧版: NaN/inf 全部比较为 false -> 落到最后 else -> SAFE, 方向级"盲区"被标为安全)
+static void test_classify_nan_is_critical() {
+    AstraProDriver astra(true);
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    InfraRedSensor ir(true);
+    SensorFusion fusion(&astra, &ultrasonic, &ir);
+    const double nan_v = std::numeric_limits<double>::quiet_NaN();
+    CHECK(SensorFusionTestAccess::classify_obstacle_level(fusion, nan_v) == ObstacleLevel::CRITICAL);
+    CHECK(SensorFusionTestAccess::classify_obstacle_level(fusion, std::numeric_limits<double>::infinity())
+          == ObstacleLevel::CRITICAL);
+    // 常规值不回归
+    CHECK(SensorFusionTestAccess::classify_obstacle_level(fusion, 0.05) == ObstacleLevel::CRITICAL);
+    CHECK(SensorFusionTestAccess::classify_obstacle_level(fusion, 0.20) == ObstacleLevel::DANGER);
+    CHECK(SensorFusionTestAccess::classify_obstacle_level(fusion, 0.40) == ObstacleLevel::WARNING);
+    CHECK(SensorFusionTestAccess::classify_obstacle_level(fusion, 1.00) == ObstacleLevel::SAFE);
+}
+
 int main() {
     test_cliff_valid_check();
     test_min_forward_valid_filter();
@@ -1060,6 +1106,8 @@ int main() {
     test_ultrasonic_disabled_removes_cliff_layer();      // v2.5: 超声链路可禁用 (真机无硬件)
     test_degraded_ladder_tightened();                    // S1 (N2): 降级阈值收紧
     test_degraded_fused_ladder_and_choose_direction();   // S1 (N2): 融合阶梯 + 选向收紧
+    test_nan_ultrasonic_sanitized();                     // T-B3: NaN 注入消毒
+    test_classify_nan_is_critical();                     // T-B3: classify 非有限输入
 
     std::cout << "passed=" << g_passed << " failed=" << g_failed << std::endl;
     return g_failed == 0 ? 0 : 1;

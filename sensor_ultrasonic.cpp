@@ -22,7 +22,7 @@ double UltrasonicArrayData::get_min_forward_distance_cm() const {
     double best = 400.0;  // 量程上限
     bool any_valid = false;
     for (const auto* r : {&front_left, &front_center, &front_right}) {
-        if (r->valid) {
+        if (r->valid && std::isfinite(r->distance_cm)) {   // T-B3: 非有限值等同无效 (双保险)
             any_valid = true;
             best = std::min(best, r->distance_cm);
         }
@@ -34,7 +34,9 @@ bool UltrasonicArrayData::get_cliff_detected() const {
     // 底部传感器读数 > 阈值 认为有跌落风险 (阈值见 config.h UltrasonicConfig, 安装高度相关)
     // 修复(F4): 必须检查 valid —— 真机超时返回 -1.0, 若只看数值会被判"安全",
     // 而回波超时往往正是量程内无可反射地面(深坑/大台阶), 应默认判为有风险
-    return !bottom.valid || bottom.distance_cm > UltrasonicConfig::cliff_threshold_cm;
+    // T-B3 (v2.9.21): 非有限值同样按有风险处理 (修复前 NaN > 阈值 = false, 曾静默 fail-open)
+    return !bottom.valid || !std::isfinite(bottom.distance_cm) ||
+           bottom.distance_cm > UltrasonicConfig::cliff_threshold_cm;
 }
 
 // v2.5: 硬件可用性 / 是否在消费模拟数据 —— 供上层在真机上拒绝假数据
@@ -244,7 +246,9 @@ bool UltrasonicArrayDriver::is_fall_risk() const {
                 std::chrono::steady_clock::now() - external_t_).count();
             if (age <= inject_timeout_sec_) {
                 const auto& b = external_data_.bottom;
-                return !b.valid || b.distance_cm > UltrasonicConfig::cliff_threshold_cm;
+                // T-B3: 非有限值 = 有风险 (fail-closed; 修复前 NaN 比较为 false -> 误判安全)
+                return !b.valid || !std::isfinite(b.distance_cm) ||
+                       b.distance_cm > UltrasonicConfig::cliff_threshold_cm;
             }
             // 过期: 回退内部读取 (have_external_ 由 read_all 下一次命中时清零, const 方法不写)
         }
@@ -252,7 +256,9 @@ bool UltrasonicArrayDriver::is_fall_risk() const {
     if (!bottom_have_.load()) return true;  // 线程未就绪 (启动初/无 bottom 传感器) -> 有风险
     std::lock_guard<std::mutex> lk(bottom_mutex_);
     const auto& b = bottom_latest_;
-    return !b.valid || b.distance_cm > UltrasonicConfig::cliff_threshold_cm;
+    // T-B3: 同注入路径 —— 非有限值 = 有风险
+    return !b.valid || !std::isfinite(b.distance_cm) ||
+           b.distance_cm > UltrasonicConfig::cliff_threshold_cm;
 }
 
 UltrasonicReading UltrasonicArrayDriver::get_bottom_reading() const {
@@ -330,6 +336,20 @@ UltrasonicArrayData UltrasonicArrayDriver::read_all() {
 void UltrasonicArrayDriver::inject_external_data(const UltrasonicArrayData& data) {
     std::lock_guard<std::mutex> lock(read_mutex_);
     external_data_ = data;
+    // v2.9.21 (T-B3, 复审批 B11): NaN/inf 消毒 —— 非有限距离一律判无效并归量程值。
+    //   修复前: 坏数据源(如 NaN 帧)且 valid=true 时原样透传进安全链; 底部 NaN 甚至会被
+    //   get_cliff_detected 判"无风险"(比较全 false = fail-open)。入口消毒后全链路
+    //   (read_all/fuse/choose_direction) 不再需要各自设防; 聚合处另有 isfinite 双保险。
+    auto sanitize = [](UltrasonicReading& r) {
+        if (!std::isfinite(r.distance_cm)) {
+            r.distance_cm = 400.0;   // 量程上限 (与"全无效"约定一致)
+            r.valid = false;
+        }
+    };
+    sanitize(external_data_.front_left);
+    sanitize(external_data_.front_center);
+    sanitize(external_data_.front_right);
+    sanitize(external_data_.bottom);
     external_t_ = std::chrono::steady_clock::now();
     have_external_ = true;
 }

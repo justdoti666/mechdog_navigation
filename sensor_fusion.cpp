@@ -31,7 +31,7 @@ FusionResult SensorFusion::fuse() {
     //   禁用时完全不碰驱动: 数据保持"全无效"(而非读回模拟随机数),
     //   且下面第 5 步不做悬崖判定 (否则 bottom 的 fail-closed 会恒判有风险 → 永远 STOP)。
     UltrasonicArrayData ultrasonic_data;   // 默认全无效 (valid=false)
-    const bool ultra_on = ultrasonic_enabled_;
+    const bool ultra_on = ultrasonic_enabled_.load(std::memory_order_relaxed);   // T-A1: 入口快照
     if (ultra_on) {
         ultrasonic_data = ultrasonic_->read_all();
     }
@@ -83,7 +83,7 @@ FusionResult SensorFusion::fuse() {
         result.min_forward_distance_m, min_ultrasonic_cm, result.cliff_detected,
         result.obstacles, result.sensors_valid, front_valid);
     // S1 (N2): 透出降级标记 (planner 据此限速; JSON/日志可观测)
-    result.depth_degraded = depth_degraded_;
+    result.depth_degraded = depth_degraded_.load(std::memory_order_relaxed);   // T-A1: 原子读
 
     return result;
 }
@@ -331,6 +331,9 @@ double SensorFusion::calc_confidence(
 
 // ========== 障碍物等级 ==========
 ObstacleLevel SensorFusion::classify_obstacle_level(double distance_m) {
+    // v2.9.21 (T-B3, 复审批 B11): 非有限 (NaN/inf) 或非正值必须判最危险档 ——
+    //   修复前 NaN 的所有比较为 false ⇒ 落到最后 else = SAFE (方向级盲区被标"安全", fail-open)。
+    if (!std::isfinite(distance_m) || distance_m <= 0.0) return ObstacleLevel::CRITICAL;
     double dist_cm = distance_m * 100;
     if (dist_cm <= EmergencyConfig::critical_dist_cm)           return ObstacleLevel::CRITICAL;
     else if (dist_cm <= EmergencyConfig::warning_dist_cm)       return ObstacleLevel::DANGER;
@@ -343,6 +346,11 @@ NavigationAction SensorFusion::determine_action(
     double min_forward_m, double min_ultrasonic_cm, bool cliff_detected,
     const std::unordered_map<std::string, FusedObstacle>& obstacles,
     bool sensors_valid, bool front_valid) {
+
+    // T-A1 (v2.9.21 复审批 M-1): 降级开关入口快照 —— 旧版函数内 3 处直接读普通 bool,
+    //   与写侧 (executor 参数回调/融合线程) 竞争 (UB); 现每调用只读一次, 全函数用局部值,
+    //   保证同一帧内各级阈值来源一致。
+    const bool dd = depth_degraded_.load(std::memory_order_relaxed);
 
     // M1 fail-closed: 全部传感器均无有效数据时, 兜底值 (8.0m/400cm) 不可信,
     // 不得"假设无障碍"继续前进 —— 停车等待数据恢复 (上游闸门超时另有兜底)
@@ -375,12 +383,12 @@ NavigationAction SensorFusion::determine_action(
 
     // S1 (N2): 降级期三级反应线收紧 (10/25/50 → 20/40/70cm); 未降级 = 原值, 逐位一致。
     //   超声与融合两套阶梯同口径 —— "退化期有超声数据就按收紧后的线取近"。
-    const double stop_cm = depth_degraded_ ? DegradedPolicyConfig::stop_cm
-                                           : EmergencyConfig::critical_dist_cm;
-    const double back_cm = depth_degraded_ ? DegradedPolicyConfig::backward_cm
-                                           : EmergencyConfig::warning_dist_cm;
-    const double turn_cm = depth_degraded_ ? DegradedPolicyConfig::turn_cm
-                                           : EmergencyConfig::safe_dist_cm;
+    const double stop_cm = dd ? DegradedPolicyConfig::stop_cm
+                              : EmergencyConfig::critical_dist_cm;
+    const double back_cm = dd ? DegradedPolicyConfig::backward_cm
+                              : EmergencyConfig::warning_dist_cm;
+    const double turn_cm = dd ? DegradedPolicyConfig::turn_cm
+                              : EmergencyConfig::safe_dist_cm;
 
     // 超声波独立紧急检查
     if (min_ultrasonic_cm <= stop_cm) {
@@ -417,6 +425,8 @@ NavigationAction SensorFusion::determine_action(
 
 NavigationAction SensorFusion::choose_direction(
     const std::unordered_map<std::string, FusedObstacle>& obstacles) {
+    // T-A1: 入口快照 (同 determine_action; 本函数内 2 处读该开关)
+    const bool dd = depth_degraded_.load(std::memory_order_relaxed);
     // M6: 直接使用当前帧障碍数据 (由 fuse() 传入), 不再读 last_fusion_ ——
     // 旧实现读上一帧, 方向决策滞后一帧 (8Hz 下 ~125ms)
     // A1: 忽略双侧失效 (valid=false) 的盲区方向, 否则 8.0m 兜底值会被当作最开阔转向。
@@ -436,10 +446,10 @@ NavigationAction SensorFusion::choose_direction(
     }
 
     // S1 (N2): 选向参考线跟随降级收紧 (50→70 / 25→40cm); 未降级 = 原值。
-    const double turn_m = (depth_degraded_ ? DegradedPolicyConfig::turn_cm
-                                           : EmergencyConfig::safe_dist_cm) / 100.0;
-    const double back_m = (depth_degraded_ ? DegradedPolicyConfig::backward_cm
-                                           : EmergencyConfig::warning_dist_cm) / 100.0;
+    const double turn_m = (dd ? DegradedPolicyConfig::turn_cm
+                              : EmergencyConfig::safe_dist_cm) / 100.0;
+    const double back_m = (dd ? DegradedPolicyConfig::backward_cm
+                              : EmergencyConfig::warning_dist_cm) / 100.0;
 
     // 中央有效且开阔 -> 缓行 (A1: 中央盲区时不得据此缓行)
     if (center_ok && center_dist > turn_m) {

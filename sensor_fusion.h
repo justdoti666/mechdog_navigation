@@ -11,6 +11,7 @@
 #include "sensor_astra.h"
 #include "sensor_ir.h"
 #include "heightmap_2d5.h"   // 路1: HeightMap25Result / CellFlag / scan_corridor (近场地形避障)
+#include <atomic>            // T-A1: 安全链路开关跨线程 (relaxed 原子)
 #include <string>
 #include <unordered_map>
 
@@ -105,16 +106,19 @@ public:
      * 禁用后: 超声不参与融合, 也不作悬崖判定 —— 由上层负责打印醒目警告,
      * 并在硬件/话题恢复后重新启用。
      */
-    void set_ultrasonic_enabled(bool on) { ultrasonic_enabled_ = on; }
-    bool ultrasonic_enabled() const { return ultrasonic_enabled_; }
+    // T-A1 (v2.9.21 复审批 M-1): 开关跨线程 (写: 构造/融合线程/executor 回调; 读: 融合线程),
+    //   普通 bool 是数据竞争 (UB) ⇒ relaxed 原子 (只需原子性, 无跨变量次序要求)。
+    void set_ultrasonic_enabled(bool on) { ultrasonic_enabled_.store(on, std::memory_order_relaxed); }
+    bool ultrasonic_enabled() const { return ultrasonic_enabled_.load(std::memory_order_relaxed); }
 
     /**
      * S1 (N2): 深度降级期开关 (由胶水包按口径② streak 状态驱动, 与超声开关同为安全链路开关)。
      * on=true: 决策侧三级反应线收紧 (DegradedPolicyConfig), planner 侧前进限速 ≤SLOW。
      * 恢复由调用方置回 false; 默认 false ⇒ 与接入前行为逐位一致 (回归安全)。
      */
-    void set_depth_degraded(bool on) { depth_degraded_ = on; }
-    bool depth_degraded() const { return depth_degraded_; }
+    // T-A1: 同超声开关 —— 写侧含 executor 参数回调 (T-A2b), 必须 relaxed 原子。
+    void set_depth_degraded(bool on) { depth_degraded_.store(on, std::memory_order_relaxed); }
+    bool depth_degraded() const { return depth_degraded_.load(std::memory_order_relaxed); }
 
 private:
     // 单元测试访问 (tests/test_fusion.cpp 专用, R-3: 测试调用真函数而非复刻逻辑)
@@ -128,9 +132,10 @@ private:
     bool   terrain_near_      = false; // 近场走廊 (0.4~1.2m) 命中禁行地形
     bool   terrain_mid_       = false; // 中距 (1.2~2.0m) 命中禁行地形
     // v2.5: 超声链路开关 (false = 不读超声/不作悬崖判定; 上层在无硬件或无数据源时置 false)
-    bool   ultrasonic_enabled_ = true;
-    // S1 (N2): 降级链开关 (由 set_depth_degraded 驱动)
-    bool   depth_degraded_ = false;
+    // T-A1: 跨线程 → relaxed 原子 (见访问器处说明)
+    std::atomic<bool> ultrasonic_enabled_{true};
+    // S1 (N2): 降级链开关 (由 set_depth_degraded 驱动; T-A1: 跨线程 → relaxed 原子)
+    std::atomic<bool> depth_degraded_{false};
     double terrain_x_         = 0.0;   // 最近命中处 x (诊断)
     // ---- v2.9 路1 细分 (按标签分级) ----
     // 证据: 实机 181 帧 STOP 124 / FORWARD 57 ⇒ "近场凸起一律 STOP" 被证伪 (见 config.h
