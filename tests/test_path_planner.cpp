@@ -132,6 +132,25 @@ static void test_degraded_release_restores() {
     CHECK(std::fabs(c.linear - PlannerConfig::max_linear_velocity) < kEps);
 }
 
+// T10 (T-A2a, v2.9.21 复审批): 从**满速**切入降级 —— 首步即 ≤ cap (硬上限)。
+//   旧版 cap 在 ramp 之前: cruise 0.20 → 切降级时 target 封顶 0.10 先, 再被 ramp
+//   从 0.20 只降 0.06 ⇒ 首步输出 0.14 越限 (实测); 本用例锁死“任何一步都不越限”。
+static void test_degraded_cap_from_cruise() {
+    PathPlanner p;
+    for (int i = 0; i < 10; ++i) p.plan(with_action(NavigationAction::FORWARD));  // 稳态 0.20
+    const double cap = PlannerConfig::max_linear_velocity * DegradedPolicyConfig::speed_scale;
+    FusionResult fr = with_action(NavigationAction::FORWARD);
+    fr.depth_degraded = true;
+    VelocityCmd c = p.plan(fr);
+    CHECK(c.linear <= cap + kEps);                  // 首步不得越限 (旧版 0.14 -> 本行红)
+    CHECK(std::fabs(c.linear - cap) < 1e-9);        // 且一步到位 = 0.10 (ramp 后封顶)
+    for (int i = 0; i < 5; ++i) {
+        c = p.plan(fr);
+        CHECK(c.linear <= cap + kEps);              // 持续降级期间恒不越限
+    }
+    CHECK(std::fabs(c.linear - cap) < 1e-9);
+}
+
 int main() {
     std::cout << "== path planner (A2) tests ==" << std::endl;
     test_stop_is_immediate();
@@ -143,6 +162,7 @@ int main() {
     test_degraded_speed_cap();          // S1: 降级限速
     test_degraded_stop_still_immediate(); // S1: 急停不受限速影响
     test_degraded_release_restores();     // S1: 解除复原
+    test_degraded_cap_from_cruise();      // T-A2a: 满速切入降级首步不越限
     std::cout << "\n" << g_checks << " checks, " << g_fail << " failed\n" << std::endl;
     return g_fail ? 1 : 0;
 }

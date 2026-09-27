@@ -16,12 +16,6 @@ VelocityCmd PathPlanner::plan(const FusionResult& fusion) {
         return {0.0, 0.0};
     }
     VelocityCmd target = action_to_cmd(fusion.recommended_action);
-    // S1 (N2): 退化期限速 —— 前进类速度封顶 SLOW 档 (v_max*speed_scale);
-    //   转向 (0.2×v_max) / 后退 (0.4×v_max) 本就在该上限之下, 不受影响; ramp 照常限幅。
-    if (fusion.depth_degraded) {
-        const double v_cap = PlannerConfig::max_linear_velocity * DegradedPolicyConfig::speed_scale;
-        if (target.linear > v_cap) target.linear = v_cap;
-    }
     // ALG-6 (v2.2): 速度 ramp —— 用闲置的 linear_accel/angular_accel 一阶限幅,
     // 消除 FORWARD→STOP→BACKWARD 瞬时跳变。safety_node timer 5Hz, dt=0.2s。
     // P3: dt 与 ROS 胶水包 safety_node 的 200ms 发布周期隐式耦合 —— 改 on_timer
@@ -31,6 +25,14 @@ VelocityCmd PathPlanner::plan(const FusionResult& fusion) {
     const double max_dw = PlannerConfig::angular_accel * dt;  // 0.5*0.2 = 0.10 rad/s 每步
     target.linear  = clamp_step(target.linear,  last_linear_,  max_dv);
     target.angular = clamp_step(target.angular, last_angular_, max_dw);
+    // S1 (N2) + T-A2a (v2.9.21 复审批): 退化期限速 —— **硬上限**, ramp 之后再封顶。
+    //   旧版在 ramp 之前对目标封顶: 从 0.2 m/s 切入降级时 target 先变 0.1, 再被 ramp
+    //   从 0.2 只降 0.06 ⇒ 首步输出 0.14 越限 (实测; 正确应一步到 0.10)。
+    //   转向 (0.2×v_max) / 后退 (0.4×v_max) 本就在该上限之下, 不受影响。
+    if (fusion.depth_degraded) {
+        const double v_cap = PlannerConfig::max_linear_velocity * DegradedPolicyConfig::speed_scale;
+        if (target.linear > v_cap) target.linear = v_cap;
+    }
     last_linear_  = target.linear;
     last_angular_ = target.angular;
     return target;
