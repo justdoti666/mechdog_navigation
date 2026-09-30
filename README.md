@@ -307,6 +307,14 @@ cmake .. -DUSE_WIRINGPI=ON -DUSE_ASTRA_SDK=ON -DASTRA_SDK_ROOT=<sdk根目录>
 cmake --build .
 ```
 
+### 版本单点（version.h）
+
+仓库根 `version.h` 是本库**唯一的版本声明**（`MAJOR/MINOR/PATCH/STR/CODE`，`CODE = MAJOR*10000 + MINOR*100 + PATCH`；文件内自带自洽 static_assert 防手误）。
+
+下游 `mechdog_navigation_ros` 构建期解析该文件并断言版本一致（B17 跨仓锁定）：不一致、或核心缺 `version.h` ⇒ ROS 侧 **configure 直接 FATAL**。
+
+**升级纪律**：本文件 PATCH+1 与 ROS 包的 `MECHDOG_CORE_VERSION_REQUIRED` 必须同批修改；两仓同时提交/推送，否则 ROS 侧构建失败（设计行为）。
+
 ## 模拟模式
 
 当 `USE_WIRINGPI` 和 `USE_ASTRA_SDK` 均未启用时，系统进入模拟模式：
