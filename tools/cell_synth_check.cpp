@@ -3,6 +3,8 @@
 //     ① 判定"确定性 cell 路径"在**地板+先验带正确**时到底命中不命中（真机日志待测，此处离线先答）；
 //     ② **直接检验**"偏航不影响 cell"这条（我今天两次改口的那个问题）—— 扫 yaw ±30°；
 //     ③ 顺带得到"装机几何(0.18m/15°)"与"台架几何"下的真值对照（供标定/单测复用）。
+//   ④ (T5 工程批) 补"外参错 3°/5°"与"非共面地面"用例 —— 旧用例渲染与假设外参恒同值
+//      (自洽几何), 结论不能外推真机; 新增 E/F 两节观测 cell/整套 在两类扰动下的表现。
 //   真值：帧由**已知位姿/镜头高**渲染（射线-平面求交），噪声 + 丢点可调。
 #include <cstdio>
 #include <cmath>
@@ -63,8 +65,7 @@ static std::vector<uint16_t> render_floor(int W, int H_px, double fx, double fy,
     return depth;
 }
 
-static void run_case(const char* name, double cam_h, double pitch, double roll, double yaw,
-                     bool installed_spec) {
+static void run_case(const char* name, double cam_h, double pitch, double roll, double yaw) {
     const int W = 640, HP = 480;
     const double fx = 570.3422047415297129, fy = 570.3422047415297129, ccx = 319.5, ccy = 239.5;
     auto depth = render_floor(W, HP, fx, fy, ccx, ccy, cam_h, pitch, roll, yaw, 8.0, 0.10, 12345);
@@ -245,20 +246,199 @@ static void run_wedge_yaw_experiment() {
     for (double yy : {0.0, 5.0, 10.0, 20.0, 30.0}) wedge_yaw_case(yy);
 }
 
+// ============================================================
+// 追加 (T5 工程批): ① 外参错位 3°/5° ② 非共面地面
+//   背景 (评审 T5): 旧用例渲染与假设外参恒同值 (自洽几何) ⇒ "cell 会命中"
+//   不能外推真机; `installed_spec` 形参从未使用 (本次移除)。
+//   E: 渲染=真实几何, **节点按假设备值变换** ⇒ 模拟外参标定/填写误差;
+//   F: 地面非单一理想平面 (台阶 / 缓慢起伏) ⇒ 模拟真实地面非共面度。
+//   ⚠ 只观测、不改行为; 数字为 [合成], 真机结论仍需真机复核。
+// ============================================================
+static bool dir_in_base(int u, int v, double fx, double fy, double cx, double cy,
+                        double pitch_deg, double roll_deg, double yaw_deg,
+                        double& bx, double& by, double& bz) {
+    const double r = roll_deg * D2R, pch = pitch_deg * D2R, yw = yaw_deg * D2R;
+    const double cr = std::cos(r), sr = std::sin(r);
+    const double cp = std::cos(pch), sp = std::sin(pch);
+    const double cyaw = std::cos(yw), syaw = std::sin(yw);
+    double dx = (u - cx) / fx, dy = (v - cy) / fy, dz = 1.0;             // 光学
+    { double xo = dz, yo = -dx, zo = -dy; dx = xo; dy = yo; dz = zo; }   // optical→link
+    double x1 = dx, y1 = cr * dy - sr * dz, z1 = sr * dy + cr * dz;      // Rx
+    double x2 = cp * x1 + sp * z1, y2 = y1, z2 = -sp * x1 + cp * z1;     // Ry
+    bx = cyaw * x2 - syaw * y2; by = syaw * x2 + cyaw * y2; bz = z2;     // Rz
+    return bz < -1e-6;                                                   // 朝下才看得到地面
+}
+
+// 台阶地面: x < x_step 处 z=-cam_h; x >= x_step 处 z=-cam_h+step_dz (垂直面忽略)
+static std::vector<uint16_t> render_step_floor(int W, int Hpx, double fx, double fy, double cx, double cy,
+                                               double cam_h, double pitch_deg, double roll_deg, double yaw_deg,
+                                               double x_step, double step_dz,
+                                               double noise_mm, double dropout, unsigned seed) {
+    std::vector<uint16_t> depth(static_cast<size_t>(W) * Hpx, 0);
+    std::mt19937 rng(seed);
+    std::normal_distribution<double> nz(0.0, noise_mm);
+    std::uniform_real_distribution<double> un(0.0, 1.0);
+    for (int v = 0; v < Hpx; ++v)
+        for (int u = 0; u < W; ++u) {
+            double bx, by, bz;
+            if (!dir_in_base(u, v, fx, fy, cx, cy, pitch_deg, roll_deg, yaw_deg, bx, by, bz)) continue;
+            double s = (-cam_h) / bz;                          // 先按基准地面求交
+            if (!(s > 0.0) || s > 8.0) continue;
+            if (bx * s >= x_step) {                            // 落点越过台阶沿 ⇒ 按台阶面重求
+                s = (-cam_h + step_dz) / bz;
+                if (!(s > 0.0) || s > 8.0) continue;
+            }
+            if (un(rng) < dropout) continue;
+            const double mm = s * 1000.0 + nz(rng);
+            if (mm < 300.0 || mm > 8000.0) continue;
+            depth[static_cast<size_t>(v) * W + u] = static_cast<uint16_t>(mm);
+        }
+    return depth;
+}
+
+// 缓慢起伏地面: 高度场 z(x) = -cam_h + amp·sin(2πx/λ); 不动点迭代求交 (amp 小, 收敛快)
+static std::vector<uint16_t> render_wavy_floor(int W, int Hpx, double fx, double fy, double cx, double cy,
+                                               double cam_h, double pitch_deg, double roll_deg, double yaw_deg,
+                                               double amp, double lambda,
+                                               double noise_mm, double dropout, unsigned seed) {
+    static const double TWO_PI = 6.283185307179586476925286766559;
+    std::vector<uint16_t> depth(static_cast<size_t>(W) * Hpx, 0);
+    const double k = TWO_PI / lambda;
+    std::mt19937 rng(seed);
+    std::normal_distribution<double> nz(0.0, noise_mm);
+    std::uniform_real_distribution<double> un(0.0, 1.0);
+    for (int v = 0; v < Hpx; ++v)
+        for (int u = 0; u < W; ++u) {
+            double bx, by, bz;
+            if (!dir_in_base(u, v, fx, fy, cx, cy, pitch_deg, roll_deg, yaw_deg, bx, by, bz)) continue;
+            double s = (-cam_h) / bz;
+            for (int it = 0; it < 8; ++it) {
+                const double zx = -cam_h + amp * std::sin(k * (bx * s));
+                const double sn = zx / bz;
+                if (!(sn > 0.0)) { s = -1.0; break; }
+                if (std::fabs(sn - s) < 1e-6) { s = sn; break; }
+                s = sn;
+            }
+            if (!(s > 0.0) || s > 8.0) continue;
+            if (un(rng) < dropout) continue;
+            const double mm = s * 1000.0 + nz(rng);
+            if (mm < 300.0 || mm > 8000.0) continue;
+            depth[static_cast<size_t>(v) * W + u] = static_cast<uint16_t>(mm);
+        }
+    return depth;
+}
+
+static void fmt_plane(char* buf, size_t n, bool hit, const GroundPlane& pl, double H) {
+    if (hit) {
+        const double h0 = -pl.d / pl.nz;
+        snprintf(buf, n, "命中=是 tilt=%5.2f° h0=%+.3f Δh0=%+6.1fmm inl=%5d",
+                 std::acos(std::fabs(pl.nz)) / D2R, h0, (h0 + H) * 1000.0, pl.inliers);
+    } else {
+        snprintf(buf, n, "命中=否 (无有效平面)");
+    }
+}
+
+// 统一走节点同款参数 (先验 -H / 窗 0.10 / 容限 15° / cell 0.05): cell 与整套 两栏 + Δh0(真值 -H)
+// + 下游 2.5D 统计 (wedge_only=false, 与 slope_case 同口径) —— 看"拟合质量变化"对分类的后果
+static void fit_and_report(const char* name, const PointCloud& base, double H) {
+    GroundSegParams g;
+    g.ground_prior_z = -H; g.prior_window = 0.10;
+    g.plane_max_tilt_deg = 15.0; g.point_on_plane_eps = 0.02;
+    g.cell_size = 0.05; g.use_cell_min_fit = true;
+    GroundPlane plane;
+    const bool hit = fit_ground_plane_cells(base, g, plane);
+    GroundSegResult seg; segment_ground(base, g, seg);
+    HeightMap25Config cfg; cfg.wedge_only = false;
+    HeightMap25Result hm; build_heightmap_25(base, seg, cfg, hm);
+    int tr = 0, up = 0, dn = 0, st = 0;
+    for (CellFlag f : hm.flag) {
+        if (f == CellFlag::Traversable) ++tr; else if (f == CellFlag::ObstacleUp) ++up;
+        else if (f == CellFlag::CliffDown) ++dn; else if (f == CellFlag::TooSteep) ++st;
+    }
+    char c1[128], c2[128];
+    fmt_plane(c1, sizeof(c1), hit, plane, H);
+    fmt_plane(c2, sizeof(c2), seg.plane.valid, seg.plane, H);
+    printf("  %-34s pts=%6zu | cell %s | 整套 %s | hm25: trav=%5d up=%4d dn=%3d st=%4d\n",
+           name, base.points.size(), c1, c2, tr, up, dn, st);
+}
+
+// 外参错位: 渲染用真实值 (true_*), 变换用假设备值 (a_*) —— 两者分开才测得出"外参错"影响
+static void extr_case(const char* name, double H,
+                      double true_pitch, double true_roll, double true_yaw,
+                      double a_pitch, double a_roll, double a_yaw) {
+    const int W = 640, HP = 480;
+    const double fx = 570.3422047415297129, fy = fx, ccx = 319.5, ccy = 239.5;
+    auto depth = render_floor(W, HP, fx, fy, ccx, ccy, H, true_pitch, true_roll, true_yaw, 8.0, 0.10, 12345);
+    CameraIntrinsics K; K.fx = fx; K.fy = fy; K.cx = ccx; K.cy = ccy;
+    K.min_depth_m = 0.3; K.max_depth_m = 8.0;
+    PointCloud opt, base;
+    depth_to_cloud_strided(depth.data(), W, HP, K, 8, opt);
+    CameraExtrinsics E; E.x = 0.12; E.y = 0.0; E.z = 0.0;
+    E.roll = a_roll * D2R; E.pitch = a_pitch * D2R; E.yaw = a_yaw * D2R;
+    transform_to_base(opt, E, base);
+    fit_and_report(name, base, H);
+}
+
+static void run_extr_experiment() {
+    printf("\n=== E: 外参错位 (渲染=真实 0.18m/俯角15°; 节点假设备值错开 3°/5°) ===\n");
+    extr_case("对照/无外参错",              0.18, 15.0, 0.0, 0.0, 15.0, 0.0, 0.0);
+    extr_case("外参错 pitch -3°(假设12°)",  0.18, 15.0, 0.0, 0.0, 12.0, 0.0, 0.0);
+    extr_case("外参错 pitch +3°(假设18°)",  0.18, 15.0, 0.0, 0.0, 18.0, 0.0, 0.0);
+    extr_case("外参错 pitch -5°(假设10°)",  0.18, 15.0, 0.0, 0.0, 10.0, 0.0, 0.0);
+    extr_case("外参错 pitch +5°(假设20°)",  0.18, 15.0, 0.0, 0.0, 20.0, 0.0, 0.0);
+    extr_case("外参错 pitch -10°(假设5°)",  0.18, 15.0, 0.0, 0.0, 5.0, 0.0, 0.0);
+    extr_case("外参错 pitch +10°(假设25°)", 0.18, 15.0, 0.0, 0.0, 25.0, 0.0, 0.0);
+    extr_case("外参错 pitch -15°(假设0°)",  0.18, 15.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    extr_case("外参错 pitch -20°(假设-5°)", 0.18, 15.0, 0.0, 0.0, -5.0, 0.0, 0.0);
+    extr_case("外参错 roll +3°",            0.18, 15.0, 0.0, 0.0, 15.0, 3.0, 0.0);
+    extr_case("外参错 roll +5°",            0.18, 15.0, 0.0, 0.0, 15.0, 5.0, 0.0);
+}
+
+static void run_noncoplanar_experiment() {
+    const int W = 640, HP = 480;
+    const double fx = 570.3422047415297129, fy = fx, ccx = 319.5, ccy = 239.5;
+    const double H = 0.18;
+    CameraIntrinsics K; K.fx = fx; K.fy = fy; K.cx = ccx; K.cy = ccy;
+    K.min_depth_m = 0.3; K.max_depth_m = 8.0;
+    CameraExtrinsics E; E.x = 0.12; E.y = 0.0; E.z = 0.0;
+    E.roll = 0.0; E.pitch = 15.0 * D2R; E.yaw = 0.0;
+    printf("\n=== F: 非共面地面 (装机 0.18m/俯角15°, 外参一致) ===\n");
+    struct StepCase { const char* tag; double dz; };
+    for (StepCase sc : {StepCase{"台阶 +5cm @x=1.2m", 0.05},
+                        StepCase{"台阶 +10cm @x=1.2m", 0.10},
+                        StepCase{"台阶 -5cm @x=1.2m", -0.05}}) {
+        auto depth = render_step_floor(W, HP, fx, fy, ccx, ccy, H, 15.0, 0.0, 0.0, 1.2, sc.dz, 8.0, 0.10, 12345);
+        PointCloud opt, base;
+        depth_to_cloud_strided(depth.data(), W, HP, K, 8, opt);
+        transform_to_base(opt, E, base);
+        fit_and_report(sc.tag, base, H);
+    }
+    for (double amp : {0.01, 0.03}) {
+        auto depth = render_wavy_floor(W, HP, fx, fy, ccx, ccy, H, 15.0, 0.0, 0.0, amp, 0.8, 8.0, 0.10, 12345);
+        PointCloud opt, base;
+        depth_to_cloud_strided(depth.data(), W, HP, K, 8, opt);
+        transform_to_base(opt, E, base);
+        char buf[64]; snprintf(buf, sizeof(buf), "缓慢起伏 ±%.0fcm (λ=0.8m)", amp * 100.0);
+        fit_and_report(buf, base, H);
+    }
+}
+
 int main() {
     run_wedge_yaw_experiment();
     run_slope_experiment();
     printf("=== 装机几何 (相机 0.18m / 俯角 15°) ===\n");
-    run_case("装机/理想(yaw=0)",        0.18, 15.0, 0.0,   0.0, true);
-    run_case("装机/yaw=+5°",            0.18, 15.0, 0.0,   5.0, true);
-    run_case("装机/yaw=+15°",           0.18, 15.0, 0.0,  15.0, true);
-    run_case("装机/yaw=-15°",           0.18, 15.0, 0.0, -15.0, true);
-    run_case("装机/yaw=+30°",           0.18, 15.0, 0.0,  30.0, true);
-    run_case("装机/roll=+3°",           0.18, 15.0, 3.0,   0.0, true);
-    run_case("装机/俯角 5°(装歪)",       0.18,  5.0, 0.0,   0.0, true);
+    run_case("装机/理想(yaw=0)",        0.18, 15.0, 0.0,   0.0);
+    run_case("装机/yaw=+5°",            0.18, 15.0, 0.0,   5.0);
+    run_case("装机/yaw=+15°",           0.18, 15.0, 0.0,  15.0);
+    run_case("装机/yaw=-15°",           0.18, 15.0, 0.0, -15.0);
+    run_case("装机/yaw=+30°",           0.18, 15.0, 0.0,  30.0);
+    run_case("装机/roll=+3°",           0.18, 15.0, 3.0,   0.0);
+    run_case("装机/俯角 5°(装歪)",       0.18,  5.0, 0.0,   0.0);
     printf("\n=== 台架几何 (当前实验室: 0.75m / 水平) ===\n");
-    run_case("台架/0.75 水平(yaw=0)",    0.75,  0.0, 0.0,   0.0, false);
-    run_case("台架/0.75 水平(yaw=+15°)", 0.75,  0.0, 0.0,  15.0, false);
-    run_case("台架/0.39 水平",           0.39,  0.0, 0.0,   0.0, false);
+    run_case("台架/0.75 水平(yaw=0)",    0.75,  0.0, 0.0,   0.0);
+    run_case("台架/0.75 水平(yaw=+15°)", 0.75,  0.0, 0.0,  15.0);
+    run_case("台架/0.39 水平",           0.39,  0.0, 0.0,   0.0);
+    run_extr_experiment();
+    run_noncoplanar_experiment();
     return 0;
 }
