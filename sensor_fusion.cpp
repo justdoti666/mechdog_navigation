@@ -370,7 +370,7 @@ NavigationAction SensorFusion::determine_action(
     // 降速/朝对侧让开)。**只处理近场**: 中距的让开与紧急距离阶梯保持原位置与优先级
     // (曾把 terrain_mid_ 一并提到此处 ⇒ 抢走距离阶梯, 被 4 条既有用例抓出回归)。
     if (terrain_near_) {
-        return terrain_action(true, terrain_near_cliff_, terrain_near_bump_,
+        return terrain_action(true, terrain_near_cliff_, terrain_near_bump_, terrain_near_pit_,
                               terrain_near_y_, terrain_near_bump_x_, false);
     }
 
@@ -488,9 +488,9 @@ void SensorFusion::set_local_terrain(const HeightMap25Result& hm,
     const double mid_hi  = TerrainAvoidConfig::mid_x_hi_m;
     const double yh      = TerrainAvoidConfig::corridor_y_half_m;
 
+    const CorridorScan near_pts = scan_corridor_points(seg.negative_points, near_lo, near_hi, yh);
     const CorridorScan near_scan = merge_corridor(
-        scan_corridor(hm, near_lo, near_hi, yh),
-        scan_corridor_points(seg.negative_points, near_lo, near_hi, yh));
+        scan_corridor(hm, near_lo, near_hi, yh), near_pts);
 
     const CorridorScan mid_scan = merge_corridor(
         scan_corridor(hm, near_hi, mid_hi, yh),
@@ -521,6 +521,9 @@ void SensorFusion::set_local_terrain(const HeightMap25Result& hm,
     const int n_bump  = scan_near_label(CellFlag::ObstacleUp, by, bx);
     terrain_near_cliff_ = (n_cliff + n_steep) > 0;
     terrain_near_bump_  = n_bump > 0;
+    terrain_near_pit_   = near_pts.blocked;   // v2.9.23 (批B N6): 负障碍点单独记账 ——
+    //   旧版它只混进 near_scan.blocked: 走廊里只要有任一无关 ObstacleUp 格, 真坑就会
+    //   落入"凸起"分级 (实测 TURN_RIGHT 慢行) 被降级; 现按来源分开, 命中即 STOP。
     terrain_near_y_     = by;
     terrain_near_bump_x_= bx;
     terrain_mid_       = mid_scan.blocked;
@@ -532,17 +535,22 @@ void SensorFusion::set_local_terrain(const HeightMap25Result& hm,
 
 // v2.9 路1 细分策略 (纯函数, 见头文件说明)。证据驱动的分级:
 //   坑/过陡 -> STOP 任何距离; 凸起 -> 贴身且正中才 STOP, 否则降速/朝对侧让开。
+//   v2.9.23 (批B N6): 负障碍点(坑的另一来源) 与坑/过陡同级 => 一律 STOP, 先于凸起分级。
 NavigationAction SensorFusion::terrain_action(bool near_any, bool near_cliff, bool near_bump,
+                                             bool near_pit,
                                              double bump_y_m, double bump_x_m, bool mid) {
     if (!near_any) {
         return mid ? NavigationAction::SLOW_FORWARD : NavigationAction::FORWARD;
     }
-    if (near_cliff) {
-        return NavigationAction::STOP;                    // 坑 / 过陡: 一律停
+    if (near_cliff || near_pit) {
+        return NavigationAction::STOP;   // 坑 / 过陡 / 负障碍点: 一律停
+        // v2.9.23 (批B N6): near_pit 单独成项 —— 修复前"负障碍点 + 走廊内任一凸起格"
+        //   会落入下方凸起分级被降级为 TURN/SLOW (实测 TURN_RIGHT), 真坑被无视。
     }
     if (!near_bump) {
         // 近场命中但**无法分级** —— 例如 P1 负障碍点路径 (hm 无效/无格子标签)。
         // 无标签不代表无危险 ⇒ 保守按 STOP, 保持接入前"近场命中即停"的行为。
+        // v2.9.23: 该分支现为兜底 (带标签来源已在上面穷尽; 负障碍点走 near_pit)。
         return NavigationAction::STOP;
     }
     if (near_bump) {
@@ -561,6 +569,7 @@ NavigationAction SensorFusion::terrain_action(bool near_any, bool near_cliff, bo
 void SensorFusion::clear_local_terrain() {
     terrain_near_cliff_= false;   // v2.9
     terrain_near_bump_ = false;   // v2.9
+    terrain_near_pit_  = false;   // v2.9.23 (批B N6)
     terrain_near_y_    = 0.0;     // v2.9
     terrain_near_bump_x_ = 0.0;   // v2.9
     terrain_near_      = false;

@@ -146,6 +146,10 @@ private:
     //   ObstacleUp 正中但未贴身 / 仅中距命中 -> 至少降速
     bool   terrain_near_cliff_ = false; // 近场命中"坑/过陡" (STOP 级)
     bool   terrain_near_bump_  = false; // 近场命中"凸起" (降速/让开级)
+    // v2.9.23 (批B N6): 近场命中 P1 负障碍点 (坑的另一来源) —— STOP 级, 先于凸起分级。
+    //   修复前它与格子标签同权混在 near_scan.blocked 里: 走廊里只要有任一无关 ObstacleUp
+    //   格, 真坑就落入"凸起"分支被降级为 TURN/SLOW (实测 TURN_RIGHT)。
+    bool   terrain_near_pit_   = false;
     double terrain_near_y_     = 0.0;   // 近场凸起命中处平均 y (>0 偏左, <0 偏右)
     double terrain_near_bump_x_ = 0.0;  // 近场凸起最近命中 x (m)
     double terrain_mid_side_  = 0.0;   // 中距命中的平均 y (>0 偏左, <0 偏右)
@@ -154,7 +158,9 @@ private:
     // v2.9 路1 细分策略 (纯函数 ⇒ 可单测)。语义:
     //   返回 FORWARD       = "路1 不表态", 调用方应继续走后面的距离阶梯
     //   返回其它动作        = 路1 直接裁定 (STOP / SLOW_FORWARD / TURN_*)
+    //   v2.9.23 (批B N6): near_pit = P1 负障碍点近场命中 ⇒ 与坑/过陡同级 STOP, 不得被凸起降级。
     static NavigationAction terrain_action(bool near_any, bool near_cliff, bool near_bump,
+                                           bool near_pit,
                                            double bump_y_m, double bump_x_m, bool mid);
 
     static constexpr double kCmToM = 0.01;

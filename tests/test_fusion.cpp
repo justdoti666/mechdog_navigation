@@ -933,6 +933,48 @@ static void test_terrain_corridor_bounds_and_negative_points() {
           == NavigationAction::FORWARD);
 }
 
+// v2.9.23 (批B N6, 二轮审查): 负障碍点(坑) + 走廊内**无关**凸起格 —— 真坑不得被凸起分级降级。
+//   修复前: 坑只混在 near_scan.blocked 里与格子标签同权 ⇒ 只要走廊里另有一格 ObstacleUp,
+//   就近场分级走"凸起"分支 (实测 TURN_RIGHT 慢行), 坑被无视 —— fail-open。
+//   修复后: 负障碍点单独记账 (terrain_near_pit_), 命中即 STOP, 先于凸起分级。
+static void test_n6_pit_not_downgraded_by_unrelated_bump() {
+    AstraProDriver astra(true);
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    InfraRedSensor ir(true);
+    SensorFusion fusion(&astra, &ultrasonic, &ir);
+    const std::unordered_map<std::string, FusedObstacle> none;
+
+    // 场景 A: 仅负障碍点 (坑) —— 无格子标签 -> STOP (行为不变, 锁回归)
+    GroundSegResult seg_pit;
+    Point3D pit; pit.x = 1.0; pit.y = 0.05; pit.z = -0.18;
+    seg_pit.negative_points.push_back(pit);
+    HeightMap25Result no_cells;   // valid=false, 无标签
+    fusion.set_local_terrain(no_cells, seg_pit);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::STOP);
+
+    // 场景 B: 坑 (y=+0.05) + 走廊内无关凸起格 (y=+0.28, 不贴身) —— 修复前 TURN_RIGHT, 必须 STOP
+    fusion.set_local_terrain(make_hm25_cell(1.0, 0.28, CellFlag::ObstacleUp), seg_pit);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::STOP);   // 旧版 TURN_RIGHT -> 本行红
+
+    // 场景 C: 对照组 —— 无坑时同一凸起格仍按原分级 (TURN_RIGHT 让开), 未被一刀切改掉
+    GroundSegResult no_neg;
+    fusion.set_local_terrain(make_hm25_cell(1.0, 0.28, CellFlag::ObstacleUp), no_neg);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::TURN_RIGHT);
+
+    // 场景 D: 坑 + 贴身正中凸起 —— 修复前后都应 STOP (凸起贴身本已 STOP); 锁回归
+    GroundSegResult seg_pit2;
+    Point3D pit2; pit2.x = 0.9; pit2.y = 0.0; pit2.z = -0.18;
+    seg_pit2.negative_points.push_back(pit2);
+    fusion.set_local_terrain(make_hm25_cell(0.6, 0.0, CellFlag::ObstacleUp), seg_pit2);
+    CHECK(SensorFusionTestAccess::determine_action(fusion, 8.0, 400.0, false, none, true, true)
+          == NavigationAction::STOP);
+
+    fusion.clear_local_terrain();
+}
+
 // v2.5: 超声链路可被**显式禁用** —— 真机上无超声硬件/无数据源时, 不能把"模拟随机数"
 // (带 valid=true, 且底部 5% 概率造悬崖) 或"bottom fail-closed 永久判悬崖"带进决策。
 // 禁用后: 悬崖层停用、超声不参与融合, 深度照常工作; 且可逆 (恢复后可再启用)。
@@ -1061,6 +1103,45 @@ static void test_nan_ultrasonic_sanitized() {
     CHECK(ultrasonic.is_fall_risk() == true);
 }
 
+// v2.9.23 (批B B11 残, 二轮审查): 注入通道的**值域**消毒 —— valid=true 但距离超出
+//   HC-SR04 物理量程 [2, 400] cm 的读数不得透传 (500/450/900 会被当成"前方开阔"
+//   照走 FORWARD, fail-open); 量程内 (含边界 2.0/400.0) 不得误杀。
+static void test_out_of_range_ultrasonic_sanitized() {
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+
+    UltrasonicArrayData d;
+    d.front_left.valid  = true; d.front_left.distance_cm  = 500.0;  // > 量程上限
+    d.front_center.valid = true; d.front_center.distance_cm = 450.0;
+    d.front_right.valid = true; d.front_right.distance_cm = 900.0;  // 离谱值
+    d.bottom.valid = true;      d.bottom.distance_cm = 15.0;
+    ultrasonic.inject_external_data(d);
+    UltrasonicArrayData back = ultrasonic.read_all();
+    CHECK(back.front_left.valid == false);      // 消毒: 超量程 -> 无效
+    CHECK(back.front_center.valid == false);
+    CHECK(back.front_right.valid == false);
+    CHECK(std::isfinite(back.front_left.distance_cm));
+    CHECK(back.front_left.distance_cm <= UltrasonicConfig::max_distance_cm + 1e-9);
+
+    // 边界与量程内: 不误杀 (2.0=下限含, 400.0=上限含, 10.0=正常)
+    UltrasonicArrayData d2;
+    d2.front_left.valid = true; d2.front_left.distance_cm = 2.0;
+    d2.front_center.valid = true; d2.front_center.distance_cm = 400.0;
+    d2.front_right.valid = true; d2.front_right.distance_cm = 10.0;
+    d2.bottom.valid = true; d2.bottom.distance_cm = 15.0;
+    ultrasonic.inject_external_data(d2);
+    UltrasonicArrayData back2 = ultrasonic.read_all();
+    CHECK(back2.front_left.valid == true);
+    CHECK(back2.front_center.valid == true);
+    CHECK(back2.front_right.valid == true);
+
+    // 下限外 (1.5) 同样消毒 (HC-SR04 下限 2cm)
+    UltrasonicArrayData d3;
+    d3.front_center.valid = true; d3.front_center.distance_cm = 1.5;
+    d3.bottom.valid = true; d3.bottom.distance_cm = 15.0;
+    ultrasonic.inject_external_data(d3);
+    CHECK(ultrasonic.read_all().front_center.valid == false);
+}
+
 // v2.9.21 (T-B3, 复审批 B11): classify_obstacle_level 对非有限输入必须判最危险档
 //   (旧版: NaN/inf 全部比较为 false -> 落到最后 else -> SAFE, 方向级"盲区"被标为安全)
 static void test_classify_nan_is_critical() {
@@ -1108,6 +1189,8 @@ int main() {
     test_degraded_fused_ladder_and_choose_direction();   // S1 (N2): 融合阶梯 + 选向收紧
     test_nan_ultrasonic_sanitized();                     // T-B3: NaN 注入消毒
     test_classify_nan_is_critical();                     // T-B3: classify 非有限输入
+    test_n6_pit_not_downgraded_by_unrelated_bump();      // v2.9.23 (批B N6): 坑不被无关凸起降级
+    test_out_of_range_ultrasonic_sanitized();            // v2.9.23 (批B B11残): 超声值域消毒
 
     std::cout << "passed=" << g_passed << " failed=" << g_failed << std::endl;
     return g_failed == 0 ? 0 : 1;

@@ -341,7 +341,13 @@ void UltrasonicArrayDriver::inject_external_data(const UltrasonicArrayData& data
     //   get_cliff_detected 判"无风险"(比较全 false = fail-open)。入口消毒后全链路
     //   (read_all/fuse/choose_direction) 不再需要各自设防; 聚合处另有 isfinite 双保险。
     auto sanitize = [](UltrasonicReading& r) {
-        if (!std::isfinite(r.distance_cm)) {
+        // v2.9.23 (批B B11 残, 二轮审查): 值域消毒 —— 除非有限外, valid=true 但距离
+        //   超出 HC-SR04 物理量程 [2, 400] cm 的读数同样判无效。修复前注入
+        //   500/450/900 cm 原样透传 ⇒ 前方被判"开阔"照走 FORWARD (fail-open)。
+        //   valid=false 的既有读数不动 (只是占位, 下游按无效过滤)。
+        if (!std::isfinite(r.distance_cm) ||
+            (r.valid && (r.distance_cm < UltrasonicConfig::min_distance_cm ||
+                         r.distance_cm > UltrasonicConfig::max_distance_cm))) {
             r.distance_cm = 400.0;   // 量程上限 (与"全无效"约定一致)
             r.valid = false;
         }
