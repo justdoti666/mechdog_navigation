@@ -9,6 +9,8 @@
  *   T6 角速度: TURN 仍 ramp; STOP 时角速度也立即归零。
  *   T7-T9 S1 (N2): 退化期限速 —— FORWARD 封顶 SLOW 档(v_max*0.5); STOP 仍直达零速;
  *        解除(好帧)后能升回 v_max。
+ *   T11-T12 (v2.9.23 批B A2残): 方向反转的零穿越闸门 —— 从巡航反向时不得有同向速度残留
+ *      (旧版 0.20→BACKWARD 输出 +0.14/+0.08/+0.02 共滑行 4.8cm; 现首步 0.0 再反向 ramp)。
  */
 #include "path_planner.h"
 
@@ -151,6 +153,38 @@ static void test_degraded_cap_from_cruise() {
     CHECK(std::fabs(c.linear - cap) < 1e-9);
 }
 
+// T11 (v2.9.23 批B A2残): 从满速巡航切入 BACKWARD —— 反向零穿越闸门。
+//   旧版: ramp 从 +0.20 逐格降 (+0.14/+0.08/+0.02) —— 命令已向后, 车仍在向前滑行 (共 4.8cm)。
+//   修复: 目标与当前输出异号 ⇒ 本步输出 0.0 (一步到停), 下一步再从零向后 ramp。
+static void test_reverse_zero_crossing_gate() {
+    PathPlanner p;
+    for (int i = 0; i < 10; ++i) p.plan(with_action(NavigationAction::FORWARD));  // 稳态 +0.20
+    VelocityCmd c = p.plan(with_action(NavigationAction::BACKWARD));
+    CHECK(std::fabs(c.linear) < kEps);            // 首步 = 0.0 (旧版 +0.14 -> 本行红)
+    c = p.plan(with_action(NavigationAction::BACKWARD));
+    CHECK(std::fabs(c.linear - (-0.06)) < 1e-9);  // 从零向后 ramp: -max_dv
+    c = p.plan(with_action(NavigationAction::BACKWARD));
+    CHECK(std::fabs(c.linear - (-0.08)) < 1e-9);  // 稳态 = -v_max*0.4
+    for (int i = 0; i < 3; ++i) {                 // 反向期间不得再出现任何正向输出
+        c = p.plan(with_action(NavigationAction::BACKWARD));
+        CHECK(c.linear <= kEps);
+    }
+}
+
+// T12 (v2.9.23 批B A2残): 对称方向 —— 从后退巡航切入 FORWARD, 同样先到零再正向 ramp。
+static void test_reverse_zero_crossing_gate_symmetric() {
+    PathPlanner p;
+    for (int i = 0; i < 10; ++i) p.plan(with_action(NavigationAction::BACKWARD)); // 稳态 -0.08
+    VelocityCmd c = p.plan(with_action(NavigationAction::FORWARD));
+    CHECK(std::fabs(c.linear) < kEps);            // 首步 = 0.0 (旧版 -0.02, 仍向后退)
+    c = p.plan(with_action(NavigationAction::FORWARD));
+    CHECK(std::fabs(c.linear - 0.06) < 1e-9);
+    for (int i = 0; i < 3; ++i) {
+        c = p.plan(with_action(NavigationAction::FORWARD));
+        CHECK(c.linear >= -kEps);
+    }
+}
+
 int main() {
     std::cout << "== path planner (A2) tests ==" << std::endl;
     test_stop_is_immediate();
@@ -163,6 +197,8 @@ int main() {
     test_degraded_stop_still_immediate(); // S1: 急停不受限速影响
     test_degraded_release_restores();     // S1: 解除复原
     test_degraded_cap_from_cruise();      // T-A2a: 满速切入降级首步不越限
+    test_reverse_zero_crossing_gate();            // v2.9.23 (批B A2残): 反向零穿越 (FORWARD→BACKWARD)
+    test_reverse_zero_crossing_gate_symmetric();  // v2.9.23 (批B A2残): 对称 (BACKWARD→FORWARD)
     std::cout << "\n" << g_checks << " checks, " << g_fail << " failed\n" << std::endl;
     return g_fail ? 1 : 0;
 }

@@ -23,8 +23,18 @@ VelocityCmd PathPlanner::plan(const FusionResult& fusion) {
     constexpr double dt = 0.2;
     const double max_dv = PlannerConfig::linear_accel  * dt;  // 0.3*0.2 = 0.06 m/s 每步
     const double max_dw = PlannerConfig::angular_accel * dt;  // 0.5*0.2 = 0.10 rad/s 每步
+    const double intended_linear = target.linear;   // ramp 前目标 (方向反转判据, 批B A2残)
     target.linear  = clamp_step(target.linear,  last_linear_,  max_dv);
     target.angular = clamp_step(target.angular, last_angular_, max_dw);
+    // v2.9.23 (批B A2 残, 二轮审查): 方向反转的**零穿越闸门** ——
+    //   旧版 ramp 对"目标与当前输出异号"无处理: 命令已 BACKWARD, 输出仍按 max_dv
+    //   从 +0.20 逐格滑向 0 (+0.14/+0.08/+0.02, 共多向前 ~4.8cm) 才真正反向。
+    //   修复: 异号 ⇒ 本步输出 0 (一步到停; 停优先于平滑), 下一步从零向目标 ramp。
+    //   注: 仅线速度; 角速度反转残留不产生位移级风险, 保持原 ramp 行为。
+    if ((last_linear_ > 0.0 && intended_linear < 0.0) ||
+        (last_linear_ < 0.0 && intended_linear > 0.0)) {
+        target.linear = 0.0;
+    }
     // S1 (N2) + T-A2a (v2.9.21 复审批): 退化期限速 —— **硬上限**, ramp 之后再封顶。
     //   旧版在 ramp 之前对目标封顶: 从 0.2 m/s 切入降级时 target 先变 0.1, 再被 ramp
     //   从 0.2 只降 0.06 ⇒ 首步输出 0.14 越限 (实测; 正确应一步到 0.10)。
