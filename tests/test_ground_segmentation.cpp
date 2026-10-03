@@ -601,6 +601,35 @@ static void test_gravity_constrained_fit_on_tiny_patch() {
     }
 }
 
+// v2.9.23 (批B B7 残, 二轮审查): RANSAC 提前退出的分母错位 ——
+//   内点域已收窄到候选集, 但早退判据 best.inliers / **全点 n** >= early_ratio:
+//   只要场景里非候选点多 (真机 n=48271 / cand=18271), 判据数学上不可能满足 ⇒ 白烧满
+//   200 轮 (感知链最大头之一)。修复 = 分母改候选集规模 (与内点统计域一致)。
+//   本用例: 稀疏共面地板 (cand≈63) + 大量高处非候选点 (n≈1400) ⇒ 修复后首轮即早退;
+//   修复前迭代数恒 = ransac_max_iters (200)。
+static void test_ransac_early_exit_b7() {
+    GroundSegParams p;
+    p.ground_prior_z = -0.20;
+    p.prior_window   = 0.10;
+
+    PointCloud c;
+    for (double x = 0.6; x <= 2.2 + 1e-9; x += 0.25)      // 地板: 稀疏 (候选集主体)
+        for (double y = -1.0; y <= 1.0 + 1e-9; y += 0.25)
+            c.points.push_back(mkpt(x, y, -0.20));
+    for (double x = 0.6; x <= 2.2 + 1e-9; x += 0.05)      // 高处密集点: 只进 n, 不进候选集
+        for (double y = -1.0; y <= 1.0 + 1e-9; y += 0.05)
+            c.points.push_back(mkpt(x, y, 1.50));
+
+    GroundSegResult r;
+    segment_ground(c, p, r);
+    std::cout << "  [B7] ransac_iters = " << r.ransac_iters << " (expect << 200)" << std::endl;
+    CHECK(r.plane.valid == true);
+    CHECK(r.used_ransac == true);
+    CHECK(std::abs(r.plane.height_at_origin() - (-0.20)) < 0.02);
+    CHECK(r.ransac_iters >= 1);        // 确实跑了 RANSAC
+    CHECK(r.ransac_iters <= 30);       // 提前退出 (修复前: 200 -> 本行红)
+}
+
 int main() {
     test_gravity_constrained_fit_on_tiny_patch();   // v2.9
     test_cell_min_fit_finds_floor_under_tilted_contamination();   // v2.7
@@ -610,6 +639,7 @@ int main() {
     test_cell_min_fit_lower_envelope_beats_dense_upper_surface();  // v2.7: 单边下包络
     test_cell_skip_ransac_keeps_cell_plane();                      // v2.9.16: cell 成功跳过 RANSAC
     test_cell_size_zero_guard();                                   // v2.9.22 (N7): cell_size=0 除法守卫
+    test_ransac_early_exit_b7();                                   // v2.9.23 (批B B7残): RANSAC 提前退出
     std::cout << "=== ground segmentation tests ===" << std::endl;
     test_baseline_flat_ground();
     test_pit_detected();

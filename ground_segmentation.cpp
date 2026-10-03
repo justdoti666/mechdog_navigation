@@ -271,7 +271,9 @@ void segment_ground(const PointCloud& cloud, const GroundSegParams& p,
             std::mt19937 rng(p.seed);
             std::uniform_int_distribution<int> pick(0, static_cast<int>(cand.size()) - 1);
             GroundPlane best;
+            int iters_executed = 0;   // v2.9.23 (批B B7): 实际迭代计数 (诊断/单测)
             for (int it = 0; it < p.ransac_max_iters; ++it) {
+                ++iters_executed;
                 const int i1 = cand[pick(rng)], i2 = cand[pick(rng)], i3 = cand[pick(rng)];
                 if (i1 == i2 || i2 == i3 || i1 == i3) continue;
                 double nx, ny, nz, d;
@@ -293,12 +295,17 @@ void segment_ground(const PointCloud& cloud, const GroundSegParams& p,
                     best.nx = nx; best.ny = ny; best.nz = nz; best.d = d;
                     best.inliers = inl;
                 }
+                // v2.9.23 (批B B7 残, 二轮审查): 分母 = **候选集规模** (与内点统计域一致),
+                //   修复前用全点 n: 非候选点多时判据数学上不可能满足 (真机 n=48271 /
+                //   cand=18271 ⇒ 需 ≥26549 内点, 上限才 18271) ⇒ 白烧满 200 轮。
                 if (best.inliers >= min_inliers &&
-                    static_cast<double>(best.inliers) / n >= p.ransac_early_ratio) {
-                    break;  // 内点率达标, 提前退出
+                    static_cast<double>(best.inliers) / static_cast<double>(cand.size())
+                        >= p.ransac_early_ratio) {
+                    break;  // 内点率达标 (候选集口径), 提前退出
                 }
             }
 
+            out.ransac_iters = iters_executed;   // v2.9.23 (批B B7): 诊断字段
             if (best.valid && best.inliers >= min_inliers) { plane = best; have_plane = true; out.used_ransac = true; }
         }
     }

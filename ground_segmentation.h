@@ -82,6 +82,9 @@ struct GroundSegResult {
     // v2.9.16: 最终平面来自哪条路径 (日志/真机核查用)
     bool used_cell   = false;   // ⓪ 确定性 cell 拟合产出过平面
     bool used_ransac = false;   // ① RANSAC 覆盖了最终平面
+    // v2.9.23 (批B B7 残, 二轮审查): ① RANSAC 实际执行的迭代数 ——
+    //   提前退出 (内点率达标) 时 < ransac_max_iters; 供单测/日志核查"是否白烧满 200 轮"。
+    int  ransac_iters = 0;
 };
 
 /**
