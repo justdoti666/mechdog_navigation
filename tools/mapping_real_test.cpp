@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
     astra.start();
 
     // --- 建图 ---
-    OccupancyGridMap map(0.25);
+    OccupancyGridMap map(MapConfig{}, /*robot_radius_m=*/0.25);   // B16: 3e086c9 起 ctor 为 MapConfig-first, 旧调用未跟改
     CameraIntrinsics K{};   // 默认 640x480 基准 (真机帧即 640x480)
     CameraExtrinsics E{};
     Pose2D pose;            // 静止: 原点, 朝 +x

@@ -26,7 +26,7 @@ if exist "%SDK%\bin\OpenNI2\Drivers\orbbec.dll" (
 )
 
 REM --- ③ 启动 2.5D ---
-cd /d "C:\Users\老w\Documents\dsh\mechdog_navigation"
+cd /d "%~dp0"
 echo.
 echo [提醒] 2.5D 需要相机外参. 若画面全灰, 请加 --pitch ^<俯角^> --height ^<离地高^>
 echo        例如: run_hm25.bat --pitch 10 --height 0.18

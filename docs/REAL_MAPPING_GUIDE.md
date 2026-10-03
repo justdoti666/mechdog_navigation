@@ -60,6 +60,8 @@ cmake --build build_real_map --config Release --target mechdog_navigation
 产物：`build_real_map\Release\mechdog_navigation.exe`
 
 > 若报 `USE_ASTRA_SDK` 相关错误，确认 `ASTRA_SDK_ROOT` 指向含 `include/astra/astra.hpp` 的 SDK 根目录。
+>
+> 附（B16，2026-10-03）：`tools\build_real.bat` 一键构建的是 **`build_real\Release\mapping_real_test.exe`**（真机 100 帧验证工具，见 README），与本节的 `build_real_map\` 是两个不同目录、不同用途，互不影响。
 
 ---
 

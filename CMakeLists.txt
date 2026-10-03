@@ -138,7 +138,8 @@ add_test(NAME cell_synth_check COMMAND cell_synth_check)
 # 真机建图验证工具 (P4, 仅 USE_ASTRA_SDK 模式编译, Windows 侧运行)
 if(USE_ASTRA_SDK)
     add_executable(mapping_real_test tools/mapping_real_test.cpp
-        sensor_astra.cpp point_cloud.cpp mapping.cpp)
+        sensor_astra.cpp point_cloud.cpp mapping.cpp ground_segmentation.cpp)
+        # B16: mapping.insert_cloud_filtered 引用 segment_ground (3e086c9 起), 补源文件否则链接失败
     target_include_directories(mapping_real_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_compile_definitions(mapping_real_test PRIVATE USE_ASTRA_SDK)
     target_include_directories(mapping_real_test PRIVATE "${ASTRA_SDK_ROOT}/include")

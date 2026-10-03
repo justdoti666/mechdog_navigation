@@ -23,7 +23,7 @@ if exist "%SDK%\bin\OpenNI2\Drivers\orbbec.dll" (
 )
 
 REM --- ③ 切换到项目目录 & 启动 ---
-cd /d "C:\Users\老w\Documents\dsh\mechdog_navigation"
+cd /d "%~dp0"
 echo.
 echo 正在启动真机建图可视化... (窗口将弹出, 3栏: 彩色|点云|占据图+轨迹)
 echo 静止模式采25帧后自动保存 mechdog_map_live.pgm
