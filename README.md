@@ -37,16 +37,16 @@
 | 模块 | 文件 | 功能 |
 |------|------|------|
 | 全局配置 | `config.h` | 传感器参数、融合分层策略、地图参数、规划参数、紧急避障阈值 |
-| 超声波驱动 | `sensor_ultrasonic.h/.cpp` | HC-SR04 驱动，4 颗分时轮询防串扰（含模拟模式；`USE_WIRINGPI` 真机模式先 `wiringPiSetupGpio` 检查，失败诚实降级；v2.9.21：非有限距离 fail-closed） |
+| 超声波驱动 | `sensor_ultrasonic.h/.cpp` | HC-SR04 驱动，4 颗分时轮询防串扰（含模拟模式；`USE_WIRINGPI` 真机模式先 `wiringPiSetupGpio` 检查，失败诚实降级；v2.9.21：非有限距离 fail-closed；v2.9.23：注入值域消毒，量程 [2,400]cm 外判无效） |
 | 深度相机驱动 | `sensor_astra.h/.cpp` | Astra Pro 驱动，通过 Orbbec Astra SDK 获取深度图（含模拟模式；真机经 `USE_ASTRA_SDK` 编译） |
 | 红外强度驱动 | `sensor_ir.h/.cpp` | TSL2591 环境红外检测，用于环境自适应权重（含模拟模式） |
-| 传感器融合 | `sensor_fusion.h/.cpp` | 分层加权融合、环境自适应、障碍物分类、导航决策（v2.9.20 退化期降级链 S1：`set_depth_degraded` 反应线收紧 10/25/50→20/40/70cm；v2.9.21：超声/降级开关原子化（跨线程安全），非有限输入判 CRITICAL） |
+| 传感器融合 | `sensor_fusion.h/.cpp` | 分层加权融合、环境自适应、障碍物分类、导航决策（v2.9.20 退化期降级链 S1：`set_depth_degraded` 反应线收紧 10/25/50→20/40/70cm；v2.9.21：超声/降级开关原子化（跨线程安全），非有限输入判 CRITICAL；v2.9.23 (批B N6)：负障碍点（坑）单独记账，命中即 STOP，不被凸起分级降级） |
 | 点云模块 | `point_cloud.h/.cpp` | 深度图→3D 点云反投影、光学系→link 系坐标变换（P0，供规划/建图预留，独立于融合层） |
-| 地面分割 | `ground_segmentation.h/.cpp` | 受约束 RANSAC 地面平面（可选 `cell` 确定性最小拟合；`cell_skip_ransac` 默认让 cell 成功时跳过 RANSAC，v2.9.16）+ 2.5D 栅格**负障碍检测**（坑/下行台阶，P1；门口试金石单测锁定） |
+| 地面分割 | `ground_segmentation.h/.cpp` | 受约束 RANSAC 地面平面（可选 `cell` 确定性最小拟合；`cell_skip_ransac` 默认让 cell 成功时跳过 RANSAC，v2.9.16）+ 2.5D 栅格**负障碍检测**（坑/下行台阶，P1；门口试金石单测锁定；v2.9.23 (批B B7残)：RANSAC 早退分母改候选集口径 + `ransac_iters` 观测字段） |
 | 建图模块 | `mapping.h/.cpp` | 位姿驱动点云累积 → log-odds 占据栅格 + 光线空闲 + 膨胀 + PGM 导出（P4） |
 | 2.5D 近场地形 | `heightmap_2d5.h/.cpp` | 单平面 2.5D 高程/可通行地形 → 越障判断（能走/凸起/沟坑/太陡，P1.5；复用 P1 地面平面） |
 | 日志系统 | `logger.h` | 分级日志 DEBUG/INFO/WARN/ERROR + 时间戳 + 可选写文件（header-only，零依赖） |
-| 路径规划 | `path_planner.h/.cpp` | 导航动作 -> 速度指令映射（STOP/REACHED_GOAL 直达零速，其余经 ramp 平滑；v2.9.20 S1：降级期前进限速≤SLOW，v2.9.21 改为 ramp 后**硬上限**（首步不越限）；DWA 待实现） |
+| 路径规划 | `path_planner.h/.cpp` | 导航动作 -> 速度指令映射（STOP/REACHED_GOAL 直达零速，其余经 ramp 平滑；v2.9.20 S1：降级期前进限速≤SLOW，v2.9.21 改为 ramp 后**硬上限**（首步不越限）；v2.9.23 (批B A2残)：方向反转零穿越闸门（反向命令首步到零，消除同向速度残留）；DWA 待实现） |
 | 单元测试 | `tests/test_fusion.cpp` | F4/F5 回归 + 融合逻辑验证 (`ctest`) |
 | 点云单测 | `tests/test_point_cloud.cpp` | 反投影/坐标变换/失效哨兵验证 (`ctest`，P0) |
 | 地面分割单测 | `tests/test_ground_segmentation.cpp` | 平地/坑/台阶/门口试金石/倾斜/退化输入/`cell_skip_ransac` 新旧行为（`ctest`，P1） |
