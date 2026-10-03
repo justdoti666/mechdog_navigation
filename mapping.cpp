@@ -35,10 +35,10 @@ OccupancyGridMap::OccupancyGridMap(const MapConfig& /*cfg*/,
                                    double extrinsics_x_m,
                                    double width_m, double height_m,
                                    double resolution_m)
-    : robot_radius_m_(robot_radius_m),
-      extrinsics_x_m_(extrinsics_x_m),
-      resolution_m_(resolution_m > 1e-6 ? resolution_m
-                                        : MapConfig::grid_size_m) {
+    : resolution_m_(resolution_m > 1e-6 ? resolution_m
+                                      : MapConfig::grid_size_m),
+      robot_radius_m_(robot_radius_m),
+      extrinsics_x_m_(extrinsics_x_m) {
     width_  = std::max(2, static_cast<int>(
         std::lround(width_m / resolution_m_)) & ~1);   // 偶数格, 原点居中
     height_ = std::max(2, static_cast<int>(

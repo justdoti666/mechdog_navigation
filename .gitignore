@@ -38,3 +38,6 @@ Log/
 *.log
 *.pgm
 docs/map_*_preview.png
+
+# nav2 地图元数据 (save_nav2_map 产物, 与 *.pgm 配对; N12)
+*.yaml
