@@ -4,7 +4,7 @@
 > 前置文档：`docs/CODE_REVIEW_BASELINE.md`（问题清单与来源）
 > 状态约定：每完成一项，将 `[ ]` 改为 `[x]` 并附提交号。
 
-> **状态总览（2026-08）**：F1/F3/F4/F5/F6/F7/F8/F12/F13 及 D1/D2/D3 缺陷修复已落地并推送（commit a6fa4fb / a0a922e）；F9（底部独立线程）暂缓待硬件阶段；F2（OpenNI2 真机）/F10（中断测距）待硬件；F14（画面反馈）挂起待决策。TSL2591 已取消购买，环境光强判定默认走 `estimate_ambient_light()` 深度图代理，`sensor_ir` 保留为可选增强。
+> **状态总览（2026-08）**：F1/F3/F4/F5/F6/F7/F8/F12/F13 及 D1/D2/D3 缺陷修复已落地并推送（commit a6fa4fb / a0a922e）；F9（底部独立线程）已在 v2.2 实施（ALG-1，2026-10-03 复核确认）；F2（OpenNI2 真机）/F10（中断测距）待硬件；F14（画面反馈）挂起待决策。TSL2591 已取消购买，环境光强判定默认走 `estimate_ambient_light()` 深度图代理，`sensor_ir` 保留为可选增强。
 
 ---
 
@@ -19,7 +19,7 @@
 | 5 | F8 | `boost::optional` 隐藏依赖 → 换 `std::optional` | 🟠 依赖 | sensor_fusion.h/.cpp、README |
 | 6 | F5 | `get_min_forward_distance_cm()` 未检查 valid | 🟠 安全 | sensor_ultrasonic.cpp |
 | 7 | F3 | 环境自适应不可验证：光强输入链路缺失 | 🔴 功能 | ✅ `sensor_ir` 驱动已生成（E:\33\mechdog_navigation_fixed\），待接入 fusion + 硬件组标定 |
-| 8 | F9 | 底部传感器无独立通路 | 🟠 设计 | **暂缓，未实施**（2026-08 标记；待硬件阶段） |
+| 8 | F9 | 底部传感器无独立通路 | 🟠 设计 | ✅ **已实施**（v2.2 ALG-1；原“暂缓”标注已作废，见 REVIEW_FIXPLAN.md） |
 | 9 | F2 | OpenNI2 真机模式空壳 | 🔴 阻塞(硬件) | sensor_astra.cpp、CMakeLists |
 | 10 | F10 | Echo 忙等轮询受调度抖动 | 🟠 精度 | sensor_ultrasonic.cpp |
 | 11 | F11 | wiringPi 版本/来源未声明 | 🟡 部署 | README |
@@ -286,9 +286,9 @@ std::pair<double, double> SensorFusion::get_adaptive_weights(...) {
 
 ---
 
-## F9 底部传感器无独立通路 【🟠 设计 · ⏸️ 暂缓，未实施】
+## F9 底部传感器无独立通路 【🟠 设计 · ✅ 已实施（v2.2 ALG-1）】
 
-> **状态（2026-08）**：本条目**暂缓**，未在 `a6fa4fb` 修复提交中实施。当前代码仍为 `read_all()` 分时轮询架构（bottom 与前方三路绑在同一 ~120ms 周期）。F4（valid 检查）已修，但独立线程重构未做，待硬件阶段再排期。
+> **状态（2026-10-03 复核更新）**：本条目**已在 v2.2 实施**（ALG-1）：`sensor_ultrasonic.cpp` 中 `bottom_loop()` 独立线程（50ms 周期 / 20Hz）+ `is_fall_risk()` fail-closed + `read_all()` 改走缓存 `get_bottom_reading()`；单测 `test_is_fall_risk_fail_closed`。原「2026-08 暂缓、未实施」标注**作废**（当时仅对该提交窗口有效；见 `docs/REVIEW_FIXPLAN.md` ALG-1）。
 
 **位置**：`sensor_ultrasonic.h` / `sensor_ultrasonic.cpp`
 
@@ -385,4 +385,4 @@ cmake .. -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -O2"
 ./mechdog_navigation
 ```
 
-**建议一次只合一个 PR**，顺序：F4 ✅ → F1 ✅ → F6 ✅ → F7 ✅ → F8 ✅ → F5 ✅ → F3 ✅（含新增 `sensor_ir` 驱动，TSL2591）→ F9 ⏸️（暂缓）→ F2 → F10/F11 → F12 ✅ → F13 ✅；F14（画面反馈）挂起待决策，不阻塞其他项。
+**建议一次只合一个 PR**，顺序：F4 ✅ → F1 ✅ → F6 ✅ → F7 ✅ → F8 ✅ → F5 ✅ → F3 ✅（含新增 `sensor_ir` 驱动，TSL2591）→ F9 ✅（v2.2 ALG-1 已实施）→ F2 → F10/F11 → F12 ✅ → F13 ✅；F14（画面反馈）挂起待决策，不阻塞其他项。
