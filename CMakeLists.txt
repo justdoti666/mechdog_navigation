@@ -127,6 +127,14 @@ target_include_directories(test_path_planner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 target_link_libraries(test_path_planner PRIVATE Threads::Threads)
 add_test(NAME path_planner_tests COMMAND test_path_planner)
 
+# T5 观测工装 (N8, 2026-10-03): cell 与"整套(过 RANSAC)"两栏对照 + 外参错位/非共面统计;
+#   带自检断言 (失败 → 非零退出码), 注册进 ctest 防回归。纯算法依赖, 无 SDK / 无 GPIO。
+add_executable(cell_synth_check tools/cell_synth_check.cpp
+    ground_segmentation.cpp point_cloud.cpp heightmap_2d5.cpp)
+target_include_directories(cell_synth_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(cell_synth_check PRIVATE Threads::Threads)
+add_test(NAME cell_synth_check COMMAND cell_synth_check)
+
 # 真机建图验证工具 (P4, 仅 USE_ASTRA_SDK 模式编译, Windows 侧运行)
 if(USE_ASTRA_SDK)
     add_executable(mapping_real_test tools/mapping_real_test.cpp

@@ -5,6 +5,9 @@
 //     ③ 顺带得到"装机几何(0.18m/15°)"与"台架几何"下的真值对照（供标定/单测复用）。
 //   ④ (T5 工程批) 补"外参错 3°/5°"与"非共面地面"用例 —— 旧用例渲染与假设外参恒同值
 //      (自洽几何), 结论不能外推真机; 新增 E/F 两节观测 cell/整套 在两类扰动下的表现。
+//   ⑤ (N8, 2026-10-03 二轮审查复核): (a) "整套"栏恢复"cell 命中后仍过 RANSAC 覆盖"的旧管线语义
+//      (节点默认 cell_skip_ransac=true 会让两栏恒等, A/B 失真; 本工装对照用途显式关闭);
+//      (b) 补自检断言 + 非零退出码, 并注册进 CMake/ctest (此前零断言、游离于构建之外)。
 //   真值：帧由**已知位姿/镜头高**渲染（射线-平面求交），噪声 + 丢点可调。
 #include <cstdio>
 #include <cmath>
@@ -21,6 +24,29 @@
 using namespace mechdog;
 
 static const double D2R = 0.01745329251994329576;
+
+// ---- 自检断言 (N8): 计数汇总, main 末尾以非零退出码标识失败; g_last = 最近一次 fit_and_report/run_case 摘要 ----
+struct LastFit {
+    bool   cell_hit = false;
+    double cell_tilt_deg = 0.0;
+    double cell_h0 = 0.0;
+    bool   seg_valid = false;
+    double seg_tilt_deg = 0.0;
+    double seg_h0 = 0.0;
+    double dh0_mm = 0.0;
+    int    tr = 0, up = 0, dn = 0, st = 0;
+};
+static LastFit g_last;
+static int g_assert_ok = 0;
+static int g_assert_fail = 0;
+#define ACHECK(cond)                                                          \
+    do {                                                                      \
+        if (cond) { ++g_assert_ok; }                                          \
+        else {                                                                \
+            ++g_assert_fail;                                                  \
+            printf("  [ASSERT-FAIL] %s:%d  %s\n", __FILE__, __LINE__, #cond); \
+        }                                                                     \
+    } while (0)
 
 // ---------- 渲染: 地平面 z_base = -H 的深度帧(16UC1 mm) ----------
 static std::vector<uint16_t> render_floor(int W, int H_px, double fx, double fy, double cx, double cy,
@@ -86,12 +112,25 @@ static void run_case(const char* name, double cam_h, double pitch, double roll, 
     g.point_on_plane_eps = 0.02;
     g.cell_size = 0.05;
     g.use_cell_min_fit = true;
+    GroundSegParams g2 = g;                   // N8: "整套"恢复"cell 命中后仍过 RANSAC 覆盖"的旧管线语义
+    g2.cell_skip_ransac = false;
 
     GroundPlane plane;
     const bool hit = fit_ground_plane_cells(base, g, plane);          // ★ 只看 cell 路径
     GroundSegResult seg;
-    segment_ground(base, g, seg);                                     // 整套(含 RANSAC)
-    printf("%-30s pts=%6zu | cell命中=%-3s inl=%5d tilt=%5.2f° h0=%+.3f | 整套: plane=%d tilt=%5.2f° h0=%+.3f\n",
+    segment_ground(base, g2, seg);                                     // 整套(过 RANSAC)
+    g_last = LastFit{};
+    g_last.cell_hit = hit;
+    if (hit) {
+        g_last.cell_tilt_deg = std::acos(std::fabs(plane.nz)) / D2R;
+        g_last.cell_h0 = -plane.d / plane.nz;
+    }
+    g_last.seg_valid = seg.plane.valid;
+    if (seg.plane.valid) {
+        g_last.seg_tilt_deg = std::acos(std::fabs(seg.plane.nz)) / D2R;
+        g_last.seg_h0 = -seg.plane.d / seg.plane.nz;
+    }
+    printf("%-30s pts=%6zu | cell命中=%-3s inl=%5d tilt=%5.2f° h0=%+.3f | 整套(过RANSAC): plane=%d tilt=%5.2f° h0=%+.3f\n",
            name, base.points.size(), hit ? "是" : "否", plane.inliers,
            hit ? std::acos(std::fabs(plane.nz)) / D2R : 0.0, hit ? -plane.d / plane.nz : 0.0,
            seg.plane.valid ? 1 : 0,
@@ -345,9 +384,10 @@ static void fit_and_report(const char* name, const PointCloud& base, double H) {
     g.ground_prior_z = -H; g.prior_window = 0.10;
     g.plane_max_tilt_deg = 15.0; g.point_on_plane_eps = 0.02;
     g.cell_size = 0.05; g.use_cell_min_fit = true;
+    GroundSegParams g2 = g;                   // N8: 同上, "整套"恢复"过 RANSAC 覆盖"语义
     GroundPlane plane;
     const bool hit = fit_ground_plane_cells(base, g, plane);
-    GroundSegResult seg; segment_ground(base, g, seg);
+    GroundSegResult seg; segment_ground(base, g2, seg);
     HeightMap25Config cfg; cfg.wedge_only = false;
     HeightMap25Result hm; build_heightmap_25(base, seg, cfg, hm);
     int tr = 0, up = 0, dn = 0, st = 0;
@@ -355,10 +395,23 @@ static void fit_and_report(const char* name, const PointCloud& base, double H) {
         if (f == CellFlag::Traversable) ++tr; else if (f == CellFlag::ObstacleUp) ++up;
         else if (f == CellFlag::CliffDown) ++dn; else if (f == CellFlag::TooSteep) ++st;
     }
+    g_last = LastFit{};
+    g_last.cell_hit = hit;
+    if (hit) {
+        g_last.cell_tilt_deg = std::acos(std::fabs(plane.nz)) / D2R;
+        g_last.cell_h0 = -plane.d / plane.nz;
+        g_last.dh0_mm = (g_last.cell_h0 + H) * 1000.0;
+    }
+    g_last.seg_valid = seg.plane.valid;
+    if (seg.plane.valid) {
+        g_last.seg_tilt_deg = std::acos(std::fabs(seg.plane.nz)) / D2R;
+        g_last.seg_h0 = -seg.plane.d / seg.plane.nz;
+    }
+    g_last.tr = tr; g_last.up = up; g_last.dn = dn; g_last.st = st;
     char c1[128], c2[128];
     fmt_plane(c1, sizeof(c1), hit, plane, H);
     fmt_plane(c2, sizeof(c2), seg.plane.valid, seg.plane, H);
-    printf("  %-34s pts=%6zu | cell %s | 整套 %s | hm25: trav=%5d up=%4d dn=%3d st=%4d\n",
+    printf("  %-34s pts=%6zu | cell %s | 整套(过RANSAC) %s | hm25: trav=%5d up=%4d dn=%3d st=%4d\n",
            name, base.points.size(), c1, c2, tr, up, dn, st);
 }
 
@@ -382,16 +435,24 @@ static void extr_case(const char* name, double H,
 static void run_extr_experiment() {
     printf("\n=== E: 外参错位 (渲染=真实 0.18m/俯角15°; 节点假设备值错开 3°/5°) ===\n");
     extr_case("对照/无外参错",              0.18, 15.0, 0.0, 0.0, 15.0, 0.0, 0.0);
+    ACHECK(g_last.cell_hit && std::fabs(g_last.dh0_mm) < 8.0);   // 无外参错: |Δh0| 应近 0 (实测 -2.0mm)
     extr_case("外参错 pitch -3°(假设12°)",  0.18, 15.0, 0.0, 0.0, 12.0, 0.0, 0.0);
     extr_case("外参错 pitch +3°(假设18°)",  0.18, 15.0, 0.0, 0.0, 18.0, 0.0, 0.0);
     extr_case("外参错 pitch -5°(假设10°)",  0.18, 15.0, 0.0, 0.0, 10.0, 0.0, 0.0);
     extr_case("外参错 pitch +5°(假设20°)",  0.18, 15.0, 0.0, 0.0, 20.0, 0.0, 0.0);
     extr_case("外参错 pitch -10°(假设5°)",  0.18, 15.0, 0.0, 0.0, 5.0, 0.0, 0.0);
+    ACHECK(std::fabs(g_last.dh0_mm) > 20.0);   // 明显外参错 ⇒ h0 被显著拖偏 (实测 -46.7mm)
     extr_case("外参错 pitch +10°(假设25°)", 0.18, 15.0, 0.0, 0.0, 25.0, 0.0, 0.0);
     extr_case("外参错 pitch -15°(假设0°)",  0.18, 15.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     extr_case("外参错 pitch -20°(假设-5°)", 0.18, 15.0, 0.0, 0.0, -5.0, 0.0, 0.0);
+    ACHECK(g_last.up > g_last.tr);   // 关键信号: 平地大面积被判凸起 (实测 trav=86 up=1635)
     extr_case("外参错 roll +3°",            0.18, 15.0, 0.0, 0.0, 15.0, 3.0, 0.0);
     extr_case("外参错 roll +5°",            0.18, 15.0, 0.0, 0.0, 15.0, 5.0, 0.0);
+    // N8: 补 yaw 错位用例 —— 旧用例 yaw 恒 0, 而模块自述真机存在明显偏航
+    extr_case("外参错 yaw +10°",            0.18, 15.0, 0.0, 0.0, 15.0, 0.0, 10.0);
+    ACHECK(g_last.cell_hit);   // N8 补测: yaw 错位不影响 cell (实测 tilt 0.02°)
+    extr_case("外参错 yaw -10°",            0.18, 15.0, 0.0, 0.0, 15.0, 0.0, -10.0);
+    ACHECK(g_last.cell_hit);
 }
 
 static void run_noncoplanar_experiment() {
@@ -412,6 +473,8 @@ static void run_noncoplanar_experiment() {
         depth_to_cloud_strided(depth.data(), W, HP, K, 8, opt);
         transform_to_base(opt, E, base);
         fit_and_report(sc.tag, base, H);
+        if (sc.dz > 0.09) ACHECK(g_last.up > 0);        // 台阶 +10cm: 必须出现凸起 (实测 up=90)
+        if (sc.dz > 0.0 && sc.dz < 0.09) ACHECK(g_last.up == 0);  // +5cm 未达阈值: 口径内不判凸起 (实测 0)
     }
     for (double amp : {0.01, 0.03}) {
         auto depth = render_wavy_floor(W, HP, fx, fy, ccx, ccy, H, 15.0, 0.0, 0.0, amp, 0.8, 8.0, 0.10, 12345);
@@ -420,6 +483,7 @@ static void run_noncoplanar_experiment() {
         transform_to_base(opt, E, base);
         char buf[64]; snprintf(buf, sizeof(buf), "缓慢起伏 ±%.0fcm (λ=0.8m)", amp * 100.0);
         fit_and_report(buf, base, H);
+        ACHECK(g_last.cell_hit);   // 缓慢起伏 ±1/3cm: cell 仍命中 (实测 tilt 0.06/0.07°)
     }
 }
 
@@ -428,17 +492,24 @@ int main() {
     run_slope_experiment();
     printf("=== 装机几何 (相机 0.18m / 俯角 15°) ===\n");
     run_case("装机/理想(yaw=0)",        0.18, 15.0, 0.0,   0.0);
+    ACHECK(g_last.cell_hit && g_last.cell_tilt_deg < 0.5);   // 理想安装: cell 命中且近水平 (实测 0.02°)
+    ACHECK(std::fabs(g_last.seg_tilt_deg - g_last.cell_tilt_deg) > 0.5);   // N8: "整套(过RANSAC)"列不再与 cell 恒等 (实测 1.82° vs 0.02°)
     run_case("装机/yaw=+5°",            0.18, 15.0, 0.0,   5.0);
     run_case("装机/yaw=+15°",           0.18, 15.0, 0.0,  15.0);
+    ACHECK(g_last.cell_hit);   // 偏航不影响 cell (T5 结论回归锁)
     run_case("装机/yaw=-15°",           0.18, 15.0, 0.0, -15.0);
+    ACHECK(g_last.cell_hit);
     run_case("装机/yaw=+30°",           0.18, 15.0, 0.0,  30.0);
+    ACHECK(g_last.cell_hit);
     run_case("装机/roll=+3°",           0.18, 15.0, 3.0,   0.0);
     run_case("装机/俯角 5°(装歪)",       0.18,  5.0, 0.0,   0.0);
+    ACHECK(g_last.cell_hit);
     printf("\n=== 台架几何 (当前实验室: 0.75m / 水平) ===\n");
     run_case("台架/0.75 水平(yaw=0)",    0.75,  0.0, 0.0,   0.0);
     run_case("台架/0.75 水平(yaw=+15°)", 0.75,  0.0, 0.0,  15.0);
     run_case("台架/0.39 水平",           0.39,  0.0, 0.0,   0.0);
     run_extr_experiment();
     run_noncoplanar_experiment();
-    return 0;
+    printf("\n=== 自检: %d 通过, %d 失败 ===\n", g_assert_ok, g_assert_fail);
+    return g_assert_fail ? 1 : 0;
 }
