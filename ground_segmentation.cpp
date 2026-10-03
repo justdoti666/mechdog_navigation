@@ -323,14 +323,17 @@ void segment_ground(const PointCloud& cloud, const GroundSegParams& p,
     // 网格: x ∈ [0, neg_far+0.5], y ∈ [-2.5, +2.5] (近场 FOV 内; 5cm cell)
     const double y_half = 2.5;
     const double x_max = p.neg_far_m + 0.5;
-    const int cols = static_cast<int>(x_max / p.cell_size) + 1;
-    const int rows = static_cast<int>(2.0 * y_half / p.cell_size) + 1;
+    // N7 (2026-10-03 二轮审查复核): cell_size=0 曾致 x_max/0 → int(inf) → 网格尺寸越界/硬崩。
+    //   与 fit_ground_plane_cells 同口径统一钳到 ≥0.01 —— 正常值 (0.05) 行为逐字节不变。
+    const double cs = (p.cell_size > 0.01) ? p.cell_size : 0.01;
+    const int cols = static_cast<int>(x_max / cs) + 1;
+    const int rows = static_cast<int>(2.0 * y_half / cs) + 1;
     std::vector<GridCell> grid(static_cast<size_t>(cols) * rows);
 
     for (int i : out.ground_indices) {
         const auto& q = pts[i];
-        const int cx = static_cast<int>(q.x / p.cell_size);
-        const int cy = static_cast<int>((q.y + y_half) / p.cell_size);
+        const int cx = static_cast<int>(q.x / cs);
+        const int cy = static_cast<int>((q.y + y_half) / cs);
         if (cx < 0 || cx >= cols || cy < 0 || cy >= rows) continue;
         GridCell& cell = grid[static_cast<size_t>(cy) * cols + cx];
         cell.has_return = true;
@@ -338,8 +341,8 @@ void segment_ground(const PointCloud& cloud, const GroundSegParams& p,
     }
     for (int i : out.obstacle_indices) {
         const auto& q = pts[i];
-        const int cx = static_cast<int>(q.x / p.cell_size);
-        const int cy = static_cast<int>((q.y + y_half) / p.cell_size);
+        const int cx = static_cast<int>(q.x / cs);
+        const int cy = static_cast<int>((q.y + y_half) / cs);
         if (cx < 0 || cx >= cols || cy < 0 || cy >= rows) continue;
         GridCell& cell = grid[static_cast<size_t>(cy) * cols + cx];
         const double s = out.plane.nx * q.x + out.plane.ny * q.y +
@@ -360,7 +363,7 @@ void segment_ground(const PointCloud& cloud, const GroundSegParams& p,
         int ref = -1;  // 最近参考 cell (地面 或 已确认的下沉面); -1 = 尚未建立参考
         for (int c = 0; c < cols; ++c) {
             const GridCell& cell = grid[static_cast<size_t>(r) * cols + c];
-            const double cell_x = (c + 0.5) * p.cell_size;
+            const double cell_x = (c + 0.5) * cs;
             if (cell_x < p.neg_near_m || cell_x > p.neg_far_m) {
                 // 只在近场带内判负障碍; 带外的地面点仍可建立参考 (给带内首个落差用)
                 if (cell.has_ground) ref = c;
@@ -374,8 +377,8 @@ void segment_ground(const PointCloud& cloud, const GroundSegParams& p,
                 if (ref >= 0 && (c - ref) >= ref_gap) {
                     // (ref, c] 判负障碍: 标记点放在各 cell 中心的平面高度处
                     for (int m = ref + 1; m <= c; ++m) {
-                        const double mx = (m + 0.5) * p.cell_size;
-                        const double my = -y_half + (r + 0.5) * p.cell_size;
+                        const double mx = (m + 0.5) * cs;
+                        const double my = -y_half + (r + 0.5) * cs;
                         const double mz = -(out.plane.nx * mx + out.plane.ny * my +
                                             out.plane.d) / out.plane.nz;
                         Point3D np;

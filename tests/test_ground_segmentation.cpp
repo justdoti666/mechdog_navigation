@@ -529,6 +529,33 @@ static void test_cell_skip_ransac_keeps_cell_plane() {
     CHECK(std::abs(h2 - (-0.42)) < 0.05);  // 旧行为回归保护 (种子固定, 确定性)
     CHECK(seg2.used_ransac == true);
 }
+
+// v2.9.22 (N7, 2026-10-03 二轮审查复核): cell_size=0 曾触发 2.5D 网格段除法 int(inf) → 越界/硬崩。
+//   修复 = 网格段统一钳到 cs = max(cell_size, 0.01) (与 fit_ground_plane_cells 的守卫同口径);
+//   断言: 与显式 cell_size=0.01 的输出逐字段一致 (钳制语义的回归锁)。
+static void test_cell_size_zero_guard() {
+    PointCloud c;
+    add_ground_patch(c, 0.6, 3.0, -1.0, 1.0, 0.05, [](double, double) { return -0.20; });
+
+    GroundSegParams p0, p1;
+    p0.ground_prior_z = p1.ground_prior_z = -0.20;
+    p0.prior_window   = p1.prior_window   = 0.10;
+    p0.use_cell_min_fit = p1.use_cell_min_fit = true;
+    p0.cell_size = 0.0;    // 修复前: 此调用即硬崩 (2.5D 网格段)
+    p1.cell_size = 0.01;   // 守卫钳制值 → 期望等价
+
+    GroundSegResult r0, r1;
+    segment_ground(c, p0, r0);
+    segment_ground(c, p1, r1);
+
+    CHECK(r0.plane.valid == r1.plane.valid);
+    CHECK(r0.used_cell == r1.used_cell);
+    CHECK(r0.ground_indices.size() == r1.ground_indices.size());
+    CHECK(r0.negative_points.size() == r1.negative_points.size());
+    if (r0.plane.valid && r1.plane.valid) {
+        CHECK(std::abs(r0.plane.height_at_origin() - r1.plane.height_at_origin()) < 1e-12);
+    }
+}
 // v2.9 (TDD 红→绿): **重力约束的地面拟合**
 //   动机: 实机地板补丁极小(0.1~0.3 m², 21~76 格)且掠射 ⇒ 自由 3 自由度平面拟合的
 //         法向不可信(实测 tilt 8.8~14.3° 乱跳、RMS 2~5cm、支撑/残差守门全过不了)。
@@ -582,6 +609,7 @@ int main() {
     test_cell_min_fit_yawed_floor();                              // v2.7: 偏航位形
     test_cell_min_fit_lower_envelope_beats_dense_upper_surface();  // v2.7: 单边下包络
     test_cell_skip_ransac_keeps_cell_plane();                      // v2.9.16: cell 成功跳过 RANSAC
+    test_cell_size_zero_guard();                                   // v2.9.22 (N7): cell_size=0 除法守卫
     std::cout << "=== ground segmentation tests ===" << std::endl;
     test_baseline_flat_ground();
     test_pit_detected();
