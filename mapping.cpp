@@ -283,13 +283,17 @@ bool OccupancyGridMap::save_nav2_map(const std::string& base_path) const {
     // --- map.yaml (nav2 map_server 加载项) ---
     std::FILE* y = std::fopen(yaml.c_str(), "wb");
     if (!y) return false;
+    // N10 (2026-10-03 复核): free_thresh 0.20 → 0.196。
+    //   nav2 map_server 语义: occ = (255-px)/255 (negate=0)。本图未知像素 = 205
+    //   ⇒ occ = 50/255 = 0.196078…; free_thresh=0.20 时 0.196 < 0.20 ⇒ 未知会被判 FREE;
+    //   取 0.196 后 0.196 < 0.196 不成立 ⇒ 保持 unknown (与 "map: 205=未知" 口径自洽)。
     std::fprintf(y,
         "image: %s\n"
         "resolution: %.6f\n"
         "origin: [%.6f, %.6f, 0.000000]\n"
         "negate: 0\n"
         "occupied_thresh: 0.65\n"
-        "free_thresh: 0.20\n",
+        "free_thresh: 0.196\n",
         pgm.c_str(), resolution_m_,
         -(width_ * resolution_m_) * 0.5,
         -(height_ * resolution_m_) * 0.5);

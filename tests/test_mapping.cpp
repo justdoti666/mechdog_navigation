@@ -455,7 +455,7 @@ int main() {
             CHECK(std::strstr(buf, "origin: [-5.000000, -5.000000, 0.000000]") != nullptr);
             CHECK(std::strstr(buf, "negate: 0") != nullptr);
             CHECK(std::strstr(buf, "occupied_thresh: 0.65") != nullptr);
-            CHECK(std::strstr(buf, "free_thresh: 0.20") != nullptr);
+            CHECK(std::strstr(buf, "free_thresh: 0.196") != nullptr);
         }
 
         // --- PGM 是 P5 (二进制), 像素数 = w*h ---
