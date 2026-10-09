@@ -135,6 +135,15 @@ target_include_directories(cell_synth_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(cell_synth_check PRIVATE Threads::Threads)
 add_test(NAME cell_synth_check COMMAND cell_synth_check)
 
+# 楔形离线重算工装 (OFFLINE_TODO #2 / PLAN C6, 2026-10-09):
+#   真机帧 (.raw/.npy) → 节点同款管线 (strided→base→segment_ground→hm25), 输出与
+#   safety_node「感知:」行同格式 ⇒ 与节点日志「同帧逐字段一致」(宿舍证据 7 工况 ALL PASS)。
+#   需要帧文件为输入, 不注册 ctest (构建即验证可编译); 纯算法依赖, 无 SDK/ROS/GPIO。
+add_executable(wedge_recompute tools/wedge_recompute.cpp
+    ground_segmentation.cpp point_cloud.cpp heightmap_2d5.cpp)
+target_include_directories(wedge_recompute PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(wedge_recompute PRIVATE Threads::Threads)
+
 # 真机建图验证工具 (P4, 仅 USE_ASTRA_SDK 模式编译, Windows 侧运行)
 if(USE_ASTRA_SDK)
     add_executable(mapping_real_test tools/mapping_real_test.cpp
