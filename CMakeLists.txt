@@ -137,7 +137,10 @@ add_test(NAME cell_synth_check COMMAND cell_synth_check)
 
 # 楔形离线重算工装 (OFFLINE_TODO #2 / PLAN C6, 2026-10-09):
 #   真机帧 (.raw/.npy) → 节点同款管线 (strided→base→segment_ground→hm25), 输出与
-#   safety_node「感知:」行同格式 ⇒ 与节点日志「同帧逐字段一致」(宿舍证据 7 工况 ALL PASS)。
+#   safety_node「感知:」行同格式 ⇒ 与节点日志「同帧逐字段一致」
+#   (证据包 C:/Users/Public/wedge_recompute_20261009/ —— 宿舍 3 帧 × pitch 共 10 工况;
+#    2026-10-11 复核加固: 工具复用节点同款深度质量门 + `--strict` + 外参显式告警,
+#    重编后十工况「感知」行与存证**逐字符一致**。详见 tools/wedge_recompute.cpp 头注释)。
 #   需要帧文件为输入, 不注册 ctest (构建即验证可编译); 纯算法依赖, 无 SDK/ROS/GPIO。
 add_executable(wedge_recompute tools/wedge_recompute.cpp
     ground_segmentation.cpp point_cloud.cpp heightmap_2d5.cpp)

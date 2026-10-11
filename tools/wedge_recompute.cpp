@@ -15,7 +15,16 @@
 // 用法:
 //   ./wedge_recompute <frame.raw|depth_000.npy> --pitch-deg <度> [--cam-h 0.75] [--cloud-z 0.0]
 //        [--cloud-x 0.12] [--prior-window 0.10] [--step 8] [--wedge-only 0|1] [--prior-z <直接指定>]
+//        [--strict]
 //   # 台架回放口径 (对齐宿舍回放矩阵): --cam-h 0.75 --cloud-z 0.0 --pitch-deg 15 --step 8
+//
+// 2026-10-11 复核加固 (对应问题报告 R-4/R-5/R-6):
+//   R-4 深度质量门: 复用 core `depth_quality_ok()` (**与 safety_node 同一函数**, 25% 且 ≥300px)。
+//       不达标 ⇒ 额外打印 `// [node-abstain]` 注释行, 明示"节点本轮不注入地形、不打「感知:」行",
+//       避免在节点 abstain 的坏帧上产生**假分歧** (离线打了行、节点什么都没打)。
+//   R-5 外参显式性: `--cam-h`/`--cloud-z` 未显式给出时打印 `[warn]` —— 台架默认 (0.75 / 0.0)
+//       与节点 launch 默认 (camera_height_m=-1.0 / cloud_z=0.18 ⇒ prior_z=-0.18) 不同, 差 0.18m。
+//   R-6 `--strict`: 质量门未过返回 3、平面无效返回 4 (默认仍恒 0, 不影响既有 diff 流程)。
 //
 // 与节点参数的对齐依据 (2026-10-09 核, 台账见 楔形离线重算_数字表_2026-10-09.md):
 //   step=8 (cloud_downsample_step 默认);  K=[570.3422047415297129,319.5,239.5] (pi_replay 同款),
@@ -24,6 +33,7 @@
 //   wedge_only=true (节点 grid_wedge_only 默认 true)。
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <string>
@@ -76,6 +86,8 @@ static std::vector<uint16_t> load_frame(const std::string& path, int& w, int& h)
             throw std::runtime_error("npy: 仅支持 <u2 (小端 uint16)");
         if (hdr.find("'fortran_order': True") != std::string::npos)
             throw std::runtime_error("npy: 不支持 fortran_order");
+        if (a <= 0 || b <= 0 || static_cast<long long>(a) * static_cast<long long>(b) > 100000000LL)
+            throw std::runtime_error("npy: shape 非法 (" + std::to_string(a) + ", " + std::to_string(b) + ")");
         h = a; w = b;
         std::vector<uint16_t> data(static_cast<size_t>(w) * h);
         f.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()) * 2);
@@ -96,24 +108,32 @@ static std::vector<uint16_t> load_frame(const std::string& path, int& w, int& h)
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) { std::fprintf(stderr, "用法: %s <frame.raw|.npy> --pitch-deg <度> [--cam-h 0.75] [--cloud-z 0.0] [--cloud-x 0.12] [--prior-window 0.10] [--step 8] [--wedge-only 1] [--prior-z <覆盖>]\n", argv[0]); return 2; }
+    if (argc < 2) { std::fprintf(stderr, "用法: %s <frame.raw|.npy> --pitch-deg <度> [--cam-h 0.75] [--cloud-z 0.0] [--cloud-x 0.12] [--prior-window 0.10] [--step 8] [--wedge-only 1] [--prior-z <覆盖>] [--strict]\n", argv[0]); return 2; }
     const std::string frame_path = argv[1];
     double pitch_deg = 0.0; bool have_pitch = false;
     double pitch_rad_lit = std::numeric_limits<double>::quiet_NaN();   // --pitch-rad: 直传字面量 (与节点 -p 值逐位一致)
     double cam_h = 0.75, cloud_z = 0.0, cloud_x = 0.12, prior_window = 0.10;
     double prior_z_override = -999.0;
     int step = 8, wedge_only = 1;
-    for (int i = 2; i + 1 < argc; i += 2) {
-        const std::string k = argv[i], v = argv[i + 1];
-        if (k == "--pitch-deg") { pitch_deg = std::atof(v.c_str()); have_pitch = true; }
-        else if (k == "--pitch-rad") { pitch_rad_lit = std::atof(v.c_str()); have_pitch = true; }
-        else if (k == "--cam-h") cam_h = std::atof(v.c_str());
-        else if (k == "--cloud-z") cloud_z = std::atof(v.c_str());
-        else if (k == "--cloud-x") cloud_x = std::atof(v.c_str());
-        else if (k == "--prior-window") prior_window = std::atof(v.c_str());
-        else if (k == "--step") step = std::atoi(v.c_str());
-        else if (k == "--wedge-only") wedge_only = std::atoi(v.c_str());
-        else if (k == "--prior-z") prior_z_override = std::atof(v.c_str());
+    bool strict = false;                              // R-6: 严格退出码
+    bool have_cam_h = false, have_cloud_z = false;    // R-5: 是否显式给出外参
+    // 2026-10-11: 改为逐项解析 —— 支持无值开关 (--strict), 且缺值/未知参数一律显式报错
+    for (int i = 2; i < argc; ++i) {
+        const std::string k = argv[i];
+        auto val = [&](const char* name) -> const char* {
+            if (i + 1 >= argc) { std::fprintf(stderr, "%s 缺参数值\n", name); std::exit(2); }
+            return argv[++i];
+        };
+        if (k == "--pitch-deg") { pitch_deg = std::atof(val("--pitch-deg")); have_pitch = true; }
+        else if (k == "--pitch-rad") { pitch_rad_lit = std::atof(val("--pitch-rad")); have_pitch = true; }
+        else if (k == "--cam-h") { cam_h = std::atof(val("--cam-h")); have_cam_h = true; }
+        else if (k == "--cloud-z") { cloud_z = std::atof(val("--cloud-z")); have_cloud_z = true; }
+        else if (k == "--cloud-x") cloud_x = std::atof(val("--cloud-x"));
+        else if (k == "--prior-window") prior_window = std::atof(val("--prior-window"));
+        else if (k == "--step") step = std::atoi(val("--step"));
+        else if (k == "--wedge-only") wedge_only = std::atoi(val("--wedge-only"));
+        else if (k == "--prior-z") prior_z_override = std::atof(val("--prior-z"));
+        else if (k == "--strict") strict = true;
         else { std::fprintf(stderr, "未知参数: %s\n", k.c_str()); return 2; }
     }
     if (!have_pitch) { std::fprintf(stderr, "必须显式给 --pitch-deg (不回退默认, 防口径混淆)\n"); return 2; }
@@ -121,6 +141,25 @@ int main(int argc, char** argv) {
     try {
         int w = 0, h = 0;
         const std::vector<uint16_t> depth = load_frame(frame_path, w, h);
+
+        // ---- R-4 (2026-10-11): 节点同款深度质量门 ----
+        //   safety_node.cpp:968-993 在反投影**之前**判 depth_quality_ok(valid_ratio, valid_px)
+        //   (即 core heightmap_2d5.cpp 的同一函数); 不达标 ⇒ 不注入地形、**不打「感知:」行**。
+        //   离线复算必须复现这条, 否则节点 abstain 的坏帧上工装照打一行 ⇒ 假分歧。
+        //   valid 口径与驱动清洗一致 (sensor_astra.cpp:500-506): MIN<=v<=MAX 记有效, 其余视作 0。
+        size_t valid_px = 0;
+        const uint16_t dlo = static_cast<uint16_t>(AstraProConfig::min_valid_mm);
+        const uint16_t dhi = static_cast<uint16_t>(AstraProConfig::max_valid_mm);
+        for (uint16_t v : depth) if (v >= dlo && v <= dhi) ++valid_px;
+        const double valid_ratio = depth.empty() ? 0.0
+            : static_cast<double>(valid_px) / static_cast<double>(depth.size());
+        DepthQualityIssue qissue = DepthQualityIssue::Ok;
+        const bool qok = depth_quality_ok(valid_ratio, static_cast<int>(valid_px), qissue);
+        if (!qok) {
+            std::printf("// [node-abstain] 深度质量门未过 (issue=%d, valid=%.1f%% / %zu px) ⇒ 节点本轮**不注入地形、"
+                        "不打「感知:」行**; 下一行仅为离线诊断, 不可与节点日志比对\n",
+                        static_cast<int>(qissue), valid_ratio * 100.0, valid_px);
+        }
 
         // ---- 与节点同源: K (pi_replay 同款) / 外参 / 先验 ----
         CameraIntrinsics K;
@@ -169,8 +208,25 @@ int main(int argc, char** argv) {
         std::printf("// 回算: pitch=%.6f° (%.10f rad) cam_h=%.2f cloud_z=%.2f prior_z=%.3f step=%d wedge_only=%d | used_cell=%d used_ransac=%d ransac_iters=%d\n",
             static_cast<double>(E.pitch) * 180.0 / kPi, static_cast<double>(E.pitch), cam_h, cloud_z, g.ground_prior_z, step, wedge_only,
             static_cast<int>(seg.used_cell), static_cast<int>(seg.used_ransac), seg.ransac_iters);
+        std::printf("// 质量门: valid=%.1f%% / %zu px ⇒ %s (issue=%d)\n",
+            valid_ratio * 100.0, valid_px,
+            qok ? "pass" : "ABSTAIN(节点本轮不打感知行)", static_cast<int>(qissue));
+        // R-5 (2026-10-11): 外参默认值属"台架口径", 与节点 launch 默认不同 ⇒ 未显式给出时明确告警
+        if (!have_cam_h || !have_cloud_z) {
+            std::fprintf(stderr,
+                "[warn] 未显式给 %s%s: 当前用**台架默认** cam_h=%.2f cloud_z=%.2f ⇒ prior_z=%.3f; "
+                "节点 launch 默认是 camera_height_m=-1.0 / cloud_z=0.18 ⇒ prior_z=-0.18 (差 0.18m)。"
+                "要和真机日志逐字段比, 请显式传 (台架矩阵: --cam-h 0.75 --cloud-z 0.0)。\n",
+                have_cam_h ? "" : "--cam-h ", have_cloud_z ? "" : "--cloud-z",
+                cam_h, cloud_z, g.ground_prior_z);
+        }
         (void)w; (void)h;
-        return (seg.plane.valid || cloud_base.points.empty()) ? 0 : 0;   // 信息系工具: 恒 0 (fail 与否由 diff 判)
+        // R-6 (2026-10-11): 默认仍恒 0 (信息系工具, 不破坏既有 diff 流程); --strict 时给可当门禁的退出码:
+        //   3 = 深度质量门未过 (节点本轮 abstain) / 4 = 平面无效 (fit=none, 2.5D 走 fail-closed)
+        if (!strict) return 0;
+        if (!qok) return 3;
+        if (!seg.plane.valid) return 4;
+        return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "错误: %s\n", e.what());
         return 1;
