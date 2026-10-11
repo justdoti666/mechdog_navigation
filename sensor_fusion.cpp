@@ -617,12 +617,56 @@ void SensorFusion::clear_local_terrain() {
 }
 
 // ========== A (v2.9.24): 隐身障碍 (镜面/透明) 交叉层检测 (纯观测; 见 config.h) ==========
-// RED 阶段桩: 接口先行, 恒不告警 —— 正例单测应全部失败 (实现见下一提交)。
+// "超声有、深度无" 单方向评估 (纯函数)。口径见 config.h HiddenObstacleConfig:
+//   alert = 超声回波在比较窗内 且 扇区(±25°)距离带(r±0.25m)内无任何禁行格。
+//   禁行格 = ObstacleUp / CliffDown / TooSteep (与走廊扫描同口径)。Traversable /
+//   Unknown 不算"解释" —— 玻璃立于走道时深度恰恰只看到地面"继续"(看穿), 无禁行格。
+//   无深度快照 / 半填充快照 / 超声无效 / 窗界外 ⇒ 不告警 (不臆断; 近场 L0 由既有
+//   超声盲区补偿分支覆盖)。
 HiddenObstacleHit SensorFusion::evaluate_hidden_obstacle_dir(
     double ultra_m, bool ultra_valid, double yaw_center_deg,
     const HeightMap25Result& hm) {
-    (void)ultra_m; (void)ultra_valid; (void)yaw_center_deg; (void)hm;
-    return HiddenObstacleHit{};
+    HiddenObstacleHit hit;
+    if (!ultra_valid) return hit;
+    if (!std::isfinite(ultra_m) ||
+        ultra_m < HiddenObstacleConfig::min_cmp_m ||
+        ultra_m > HiddenObstacleConfig::max_cmp_m) {
+        return hit;
+    }
+    if (!hm.valid || hm.cols <= 0 || hm.rows <= 0) return hit;
+    const size_t n = static_cast<size_t>(hm.cols) * static_cast<size_t>(hm.rows);
+    if (hm.flag.size() < n) return hit;               // 防御: 半填充快照
+    const bool has_h = (hm.height.size() >= n);
+
+    constexpr double kPi  = 3.14159265358979323846;
+    constexpr double kD2R = kPi / 180.0;
+    const double band_lo = ultra_m - HiddenObstacleConfig::band_m;
+    const double band_hi = ultra_m + HiddenObstacleConfig::band_m;
+    const double half    = HiddenObstacleConfig::sector_half_deg * kD2R;
+    const double yaw     = yaw_center_deg * kD2R;
+
+    for (int r = 0; r < hm.rows; ++r) {
+        for (int c = 0; c < hm.cols; ++c) {
+            double wx = 0.0, wy = 0.0;
+            hm.index_to_world(c, r, wx, wy);
+            const double rad = std::hypot(wx, wy);
+            if (rad < band_lo || rad > band_hi) continue;
+            double d = std::atan2(wy, wx) - yaw;
+            while (d >  kPi) d -= 2.0 * kPi;
+            while (d < -kPi) d += 2.0 * kPi;
+            if (std::abs(d) > half) continue;
+            const size_t idx = static_cast<size_t>(r) * static_cast<size_t>(hm.cols) +
+                               static_cast<size_t>(c);
+            const CellFlag f = hm.flag[idx];
+            if (f == CellFlag::ObstacleUp || f == CellFlag::CliffDown ||
+                f == CellFlag::TooSteep) {
+                ++hit.blockers_in_band;
+            }
+            if (has_h && std::isfinite(hm.height[idx])) ++hit.samples_in_band;
+        }
+    }
+    hit.alert = (hit.blockers_in_band == 0);
+    return hit;
 }
 
 // M1: 全部传感器均无有效数据?
