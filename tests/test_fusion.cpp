@@ -6,6 +6,7 @@
  *   - get_min_forward_distance_cm() 过滤无效读数 (回归 F5)
  *   - layer_fusion() 分层边界
  *   - calc_confidence() 一致性
+ *   - A: 隐身障碍交叉层检测 (超声有/深度无) 语义 + 边界 + fuse() 集成 (v2.9.24)
  *
  * 构建/运行:
  *   g++ -std=c++20 test_fusion.cpp sensor_ultrasonic.cpp sensor_astra.cpp sensor_ir.cpp sensor_fusion.cpp -lpthread -o test_fusion
@@ -146,6 +147,13 @@ public:
     // ALG-3 (v2.2): 暴露 determine_environment 验证单一链路 (真实 IR/深度代理/模拟 IR/室外)
     static EnvironmentType determine_environment(SensorFusion& f, const AstraFrame& frame) {
         return f.determine_environment(frame);
+    }
+    // A (v2.9.24): 隐身障碍单方向评估 (纯函数直测; 口径见 config.h HiddenObstacleConfig)
+    static HiddenObstacleHit evaluate_hidden_obstacle_dir(
+        double ultra_m, bool ultra_valid, double yaw_center_deg,
+        const HeightMap25Result& hm) {
+        return SensorFusion::evaluate_hidden_obstacle_dir(ultra_m, ultra_valid,
+                                                          yaw_center_deg, hm);
     }
 };
 
@@ -752,6 +760,12 @@ static HeightMap25Result make_hm25_band(double wx, double y_lo, double y_hi, Cel
     return hm;
 }
 
+// A (v2.9.24): 全 Unknown 的 2.5D 结果 (无禁行格, 无世界样本标记) ——
+//   "深度沉默"基底: 模拟镜面/透明体的深度侧表现 (超声有回波、深度无对应障碍)。
+static HeightMap25Result make_hm25_blank() {
+    return make_hm25_cell(99.0, 99.0, CellFlag::Unknown);  // 越界 → 无格被置忙
+}
+
 static void test_terrain_near_block_stops() {
     AstraProDriver astra(true);
     UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
@@ -1160,6 +1174,106 @@ static void test_classify_nan_is_critical() {
     CHECK(SensorFusionTestAccess::classify_obstacle_level(fusion, 1.00) == ObstacleLevel::SAFE);
 }
 
+// ============================================================
+// A (v2.9.24): 隐身障碍 (镜面/透明) 交叉层检测 —— "超声有、深度无"
+//   依据: 镜面/透明对红外 (Astra/雷达) 隐身, 对声波 (超声) 不隐身;
+//         不一致 (超声有回波、2.5D 同方位带内无禁行格) = 惰性障碍物签名。
+//   口径: config.h HiddenObstacleConfig (窗 [0.90,3.00]m / 带 ±0.25m / 扇区 ±25°)。
+//   纯观测: 锁定"检测语义 + 关闭路径 (= 接入前行为)"; 不涉及任何动作变化。
+// ============================================================
+static void test_hidden_obstacle_detect_and_negative() {
+    const auto blank = make_hm25_blank();
+
+    // ① 正例 (镜面/玻璃签名): 超声 1.0m 有效 + 深度同方位带内无禁行格 ⇒ 告警
+    auto h = SensorFusionTestAccess::evaluate_hidden_obstacle_dir(1.0, true, 0.0, blank);
+    CHECK(h.alert == true);
+    CHECK(h.blockers_in_band == 0);
+
+    // ② 反例: 深度在同带内看到障碍 (超声回波可被解释) ⇒ 不告警 —— 三种禁行标签同口径
+    CHECK(SensorFusionTestAccess::evaluate_hidden_obstacle_dir(
+        1.0, true, 0.0, make_hm25_cell(1.0, 0.0, CellFlag::ObstacleUp)).alert == false);
+    CHECK(SensorFusionTestAccess::evaluate_hidden_obstacle_dir(
+        1.0, true, 0.0, make_hm25_cell(1.0, 0.0, CellFlag::CliffDown)).alert == false);
+    CHECK(SensorFusionTestAccess::evaluate_hidden_obstacle_dir(
+        1.0, true, 0.0, make_hm25_cell(1.0, 0.0, CellFlag::TooSteep)).alert == false);
+
+    // ③ 地面 (Traversable) 不算解释 —— 玻璃立于走道时深度恰恰只见"地面继续" ⇒ 仍告警
+    {
+        auto trav = make_hm25_cell(1.0, 0.0, CellFlag::Traversable);
+        auto ht = SensorFusionTestAccess::evaluate_hidden_obstacle_dir(1.0, true, 0.0, trav);
+        CHECK(ht.alert == true);
+        CHECK(ht.samples_in_band > 0);   // 诊断: 深度有样本 (看穿地面) 且无禁行格
+    }
+
+    // ④ 超声无效 / 无地形快照 ⇒ 不告警 (无矛盾可言, 不凭单侧臆断)
+    CHECK(SensorFusionTestAccess::evaluate_hidden_obstacle_dir(1.0, false, 0.0, blank).alert == false);
+    {
+        HeightMap25Result none;   // valid=false (未注入)
+        CHECK(SensorFusionTestAccess::evaluate_hidden_obstacle_dir(1.0, true, 0.0, none).alert == false);
+    }
+}
+
+static void test_hidden_obstacle_window_and_sector() {
+    const auto blank = make_hm25_blank();
+
+    // ① 比较窗 [0.90, 3.00] m (含端点)
+    CHECK(SensorFusionTestAccess::evaluate_hidden_obstacle_dir(0.90, true, 0.0, blank).alert == true);
+    CHECK(SensorFusionTestAccess::evaluate_hidden_obstacle_dir(0.89, true, 0.0, blank).alert == false);
+    CHECK(SensorFusionTestAccess::evaluate_hidden_obstacle_dir(3.00, true, 0.0, blank).alert == true);
+    CHECK(SensorFusionTestAccess::evaluate_hidden_obstacle_dir(3.01, true, 0.0, blank).alert == false);
+
+    // ② 距离带 ±0.25m: 超声 1.0m ⇒ 带 [0.75,1.25]; 格心 1.025 在内 (解释⇒不告警) /
+    //    格心 1.275 在带外 (不解释⇒告警)
+    CHECK(SensorFusionTestAccess::evaluate_hidden_obstacle_dir(
+        1.0, true, 0.0, make_hm25_cell(1.0, 0.0, CellFlag::ObstacleUp)).alert == false);
+    CHECK(SensorFusionTestAccess::evaluate_hidden_obstacle_dir(
+        1.0, true, 0.0, make_hm25_cell(1.25, 0.0, CellFlag::ObstacleUp)).alert == true);
+
+    // ③ 扇区 ±25°: 障碍 (1.0, 0.6) ≈ 径向 1.20m / 方位 +31° ——
+    //    对 center (扇区 ±25°) 在扇区外 ⇒ 不解释 (告警);
+    //    对 left (中心 +30°, 扇区 [5°,55°]) 在扇区内 ⇒ 解释 (不告警)
+    {
+        auto off = make_hm25_cell(1.0, 0.6, CellFlag::ObstacleUp);
+        CHECK(SensorFusionTestAccess::evaluate_hidden_obstacle_dir(1.15, true, 0.0, off).alert == true);
+        CHECK(SensorFusionTestAccess::evaluate_hidden_obstacle_dir(1.15, true, 30.0, off).alert == false);
+    }
+}
+
+static void test_hidden_obstacle_fuse_integration() {
+    AstraProDriver astra(true);
+    UltrasonicArrayDriver ultrasonic(get_ultrasonic_layout());
+    InfraRedSensor ir(true);
+    SensorFusion fusion(&astra, &ultrasonic, &ir);
+    GroundSegResult no_neg;
+
+    // 注入外部超声: 仅正前 1.0m 有效 (注入新鲜期内 read_all 优先返回注入缓存)
+    UltrasonicArrayData inj;
+    inj.front_center.valid = true;
+    inj.front_center.distance_cm = 100.0;
+
+    // ① 地形快照 = 深度沉默 ⇒ fuse() 上报可疑: 方向=正前 / 距离=1.0m
+    fusion.set_local_terrain(make_hm25_blank(), no_neg);
+    ultrasonic.inject_external_data(inj);
+    auto r1 = fusion.fuse();
+    CHECK(r1.hidden_obstacle_suspect == true);
+    CHECK(r1.hidden_obstacle_dir == "center");
+    CHECK(std::abs(r1.hidden_obstacle_dist_m - 1.0) < 1e-9);
+
+    // ② 深度同带内看到障碍 ⇒ 不可疑 (字段回滚干净)
+    fusion.set_local_terrain(make_hm25_cell(1.0, 0.0, CellFlag::ObstacleUp), no_neg);
+    ultrasonic.inject_external_data(inj);   // 刷新注入新鲜度
+    auto r2 = fusion.fuse();
+    CHECK(r2.hidden_obstacle_suspect == false);
+    CHECK(r2.hidden_obstacle_dir.empty());
+    CHECK(r2.hidden_obstacle_dist_m == 0.0);
+
+    // ③ clear_local_terrain ⇒ A 检测停用 (接入前行为)
+    fusion.clear_local_terrain();
+    ultrasonic.inject_external_data(inj);
+    auto r3 = fusion.fuse();
+    CHECK(r3.hidden_obstacle_suspect == false);
+}
+
 int main() {
     test_cliff_valid_check();
     test_min_forward_valid_filter();
@@ -1191,6 +1305,9 @@ int main() {
     test_classify_nan_is_critical();                     // T-B3: classify 非有限输入
     test_n6_pit_not_downgraded_by_unrelated_bump();      // v2.9.23 (批B N6): 坑不被无关凸起降级
     test_out_of_range_ultrasonic_sanitized();            // v2.9.23 (批B B11残): 超声值域消毒
+    test_hidden_obstacle_detect_and_negative();          // A (v2.9.24): 隐身障碍签名/反例
+    test_hidden_obstacle_window_and_sector();            // A (v2.9.24): 窗/带/扇区边界
+    test_hidden_obstacle_fuse_integration();             // A (v2.9.24): fuse() 集成 (注入超声 + 2.5D)
 
     std::cout << "passed=" << g_passed << " failed=" << g_failed << std::endl;
     return g_failed == 0 ? 0 : 1;

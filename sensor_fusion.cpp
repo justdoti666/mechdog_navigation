@@ -52,6 +52,41 @@ FusionResult SensorFusion::fuse() {
             direction, astra_frame, ultrasonic_data, astra_w, ultra_w);
     }
 
+    // 4.5 A (v2.9.24): 隐身障碍 (镜面/透明) 交叉层检测 —— "超声有、深度无"不一致。
+    //   纯观测: 只填 hidden_obstacle_* 三个字段, 不参与任何动作/阈值 (行为挂接待会签)。
+    //   启用条件: 超声链路启用 + 已注入有效 2.5D 快照; 否则整体跳过 (= 接入前行为)。
+    if (ultra_on && terrain_hm_.valid && terrain_hm_.cols > 0) {
+        // 方向 → (layout key, base 系扇区中心角)。按物理侧取角: 左 +30° / 右 -30°
+        //   (逆时针为正, +y=左; 与地形模块 "y>0 偏左" 口径一致)。config layout 的
+        //   yaw_offset_deg 仅取量级作参照 (其符号为旧元数据记号, 见 config.h 注)。
+        const auto& layout = get_ultrasonic_layout();
+        double yaw_mag = 30.0;
+        const auto it_fl = layout.find("front_left");
+        if (it_fl != layout.end()) yaw_mag = std::abs(it_fl->second.yaw_offset_deg);
+        struct Probe { const char* dir; double yaw; };
+        const Probe probes[3] = {
+            {"left",   +yaw_mag},
+            {"center",  0.0},
+            {"right",  -yaw_mag},
+        };
+        double best_r = std::numeric_limits<double>::max();
+        for (const auto& p : probes) {
+            const auto* ul = get_ultrasonic_reading(ultrasonic_data, p.dir);
+            const bool ok = (ul && ul->valid);
+            const double ultra_m = ok ? ul->distance_cm * kCmToM
+                                      : UltrasonicConfig::kUltrasonicInvalidM;
+            const auto hit = evaluate_hidden_obstacle_dir(ultra_m, ok, p.yaw, terrain_hm_);
+            if (hit.alert && ultra_m < best_r) {
+                best_r = ultra_m;
+                result.hidden_obstacle_suspect = true;
+                result.hidden_obstacle_dir     = p.dir;
+            }
+        }
+        if (result.hidden_obstacle_suspect) {
+            result.hidden_obstacle_dist_m = std::round(best_r * 1000.0) / 1000.0;
+        }
+    }
+
     // 5. 底部悬崖检测（仅超声波）
     // ALG-1 (v2.2): 改用 is_fall_risk() —— 独立 20Hz bottom 线程的 fail-closed 判定,
     // 不再依赖同周期 read_all 的 bottom (后者现仅为缓存值, 供 build_bottom_obstacle 用)
@@ -483,6 +518,7 @@ NavigationAction SensorFusion::choose_direction(
 // 未注入/命中为空 -> terrain_* 全 false, determine_action 行为与接入前逐位一致。
 void SensorFusion::set_local_terrain(const HeightMap25Result& hm,
                                      const GroundSegResult& seg) {
+    terrain_hm_ = hm;   // A (v2.9.24): 留存快照, 供 fuse() 做"超声 × 深度"跨层比较
     const double near_lo = TerrainAvoidConfig::near_x_lo_m;
     const double near_hi = TerrainAvoidConfig::near_x_hi_m;
     const double mid_hi  = TerrainAvoidConfig::mid_x_hi_m;
@@ -567,6 +603,7 @@ NavigationAction SensorFusion::terrain_action(bool near_any, bool near_cliff, bo
 }
 
 void SensorFusion::clear_local_terrain() {
+    terrain_hm_ = HeightMap25Result{};   // A (v2.9.24): 撤销快照 (A 检测随之停用)
     terrain_near_cliff_= false;   // v2.9
     terrain_near_bump_ = false;   // v2.9
     terrain_near_pit_  = false;   // v2.9.23 (批B N6)
@@ -577,6 +614,15 @@ void SensorFusion::clear_local_terrain() {
     terrain_x_         = 0.0;
     terrain_mid_side_  = 0.0;
     terrain_mid_count_ = 0;
+}
+
+// ========== A (v2.9.24): 隐身障碍 (镜面/透明) 交叉层检测 (纯观测; 见 config.h) ==========
+// RED 阶段桩: 接口先行, 恒不告警 —— 正例单测应全部失败 (实现见下一提交)。
+HiddenObstacleHit SensorFusion::evaluate_hidden_obstacle_dir(
+    double ultra_m, bool ultra_valid, double yaw_center_deg,
+    const HeightMap25Result& hm) {
+    (void)ultra_m; (void)ultra_valid; (void)yaw_center_deg; (void)hm;
+    return HiddenObstacleHit{};
 }
 
 // M1: 全部传感器均无有效数据?

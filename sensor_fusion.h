@@ -69,6 +69,20 @@ struct FusionResult {
     bool   terrain_block_near = false;  // 前方 0.4~1.2m 走廊内有坑/台阶 (STOP 级)
     bool   terrain_block_mid  = false;  // 前方 1.2~2.0m 有坑/台阶 (降速/让开级)
     double terrain_block_x_m  = 0.0;    // 最近命中处的 x (m; 0 = 无命中)
+    // A (v2.9.24): 隐身障碍 (镜面/透明) 交叉层检测 —— 纯观测, 不改任何动作
+    //   (行为挂接待会签)。语义: 某前向方向 "超声有回波 ∈ 比较窗 + 2.5D 同方位±带内
+    //   无禁行格" ⇒ true (口径见 config.h HiddenObstacleConfig)。
+    //   未注入地形 / 超声链路关 / 无触发 ⇒ false/空/0 (= 接入前行为逐位一致)。
+    bool        hidden_obstacle_suspect = false;
+    std::string hidden_obstacle_dir;           // 触发方向里距离最近的一路 ("left"/"center"/"right"; 无=空)
+    double      hidden_obstacle_dist_m  = 0.0; // 该路超声距离 (m; 无触发=0)
+};
+
+/** A (v2.9.24): 单方向"隐身障碍"评估结果 (纯函数输出; 诊断字段供日志/单测) */
+struct HiddenObstacleHit {
+    bool alert            = false; // 超声有回波 ∈ 比较窗 且 扇区带内无禁行格 ⇒ 可疑
+    int  blockers_in_band = 0;     // 扇区带内禁行格数 (0 = 深度无对应障碍)
+    int  samples_in_band  = 0;     // 扇区带内已测样本数 (诊断: >0 且无禁行格 ≈ 深度"看穿")
 };
 
 /**
@@ -136,6 +150,9 @@ private:
     std::atomic<bool> ultrasonic_enabled_{true};
     // S1 (N2): 降级链开关 (由 set_depth_degraded 驱动; T-A1: 跨线程 → relaxed 原子)
     std::atomic<bool> depth_degraded_{false};
+    // A (v2.9.24): 近期 2.5D 快照 (set_local_terrain 注入, clear_local_terrain 清空)。
+    //   fuse() 里做"超声 × 深度"跨层比较用; valid=false / 未注入时 A 检测整体不启用。
+    HeightMap25Result terrain_hm_;
     double terrain_x_         = 0.0;   // 最近命中处 x (诊断)
     // ---- v2.9 路1 细分 (按标签分级) ----
     // 证据: 实机 181 帧 STOP 124 / FORWARD 57 ⇒ "近场凸起一律 STOP" 被证伪 (见 config.h
@@ -164,6 +181,13 @@ private:
                                            double bump_y_m, double bump_x_m, bool mid);
 
     static constexpr double kCmToM = 0.01;
+
+    // A (v2.9.24): 隐身障碍单方向评估 (纯函数 ⇒ 可单测)。口径见 config.h HiddenObstacleConfig。
+    //   ultra_m: 超声距离 (m; ultra_valid=false 时传入任意值)
+    //   yaw_center_deg: 该方向扇区中心角 (base_link 系, 逆时针为正, +y=左)
+    static HiddenObstacleHit evaluate_hidden_obstacle_dir(
+        double ultra_m, bool ultra_valid, double yaw_center_deg,
+        const HeightMap25Result& hm);
 
     EnvironmentType determine_environment(const AstraFrame& frame);
     // ALG-3 (v2.2): 归一化光强 -> 环境档位 (IR 与深度代理同源阈值, 见 EnvironmentThresholds)
