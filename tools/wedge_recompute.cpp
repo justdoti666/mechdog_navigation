@@ -16,6 +16,7 @@
 //   ./wedge_recompute <frame.raw|depth_000.npy> --pitch-deg <度> [--cam-h 0.75] [--cloud-z 0.0]
 //        [--cloud-x 0.12] [--prior-window 0.10] [--step 8] [--wedge-only 0|1] [--prior-z <直接指定>]
 //        [--strict]
+//   # 注: --step ≤1 等同"全量不抽样" (point_cloud.cpp:74 防御分支); 宿舍矩阵统一 step=8。
 //   # 台架回放口径 (对齐宿舍回放矩阵): --cam-h 0.75 --cloud-z 0.0 --pitch-deg 15 --step 8
 //
 // 2026-10-11 复核加固 (对应问题报告 R-4/R-5/R-6):
@@ -23,7 +24,7 @@
 //       不达标 ⇒ 额外打印 `// [node-abstain]` 注释行, 明示"节点本轮不注入地形、不打「感知:」行",
 //       避免在节点 abstain 的坏帧上产生**假分歧** (离线打了行、节点什么都没打)。
 //   R-5 外参显式性: `--cam-h`/`--cloud-z` 未显式给出时打印 `[warn]` —— 台架默认 (0.75 / 0.0)
-//       与节点 launch 默认 (camera_height_m=-1.0 / cloud_z=0.18 ⇒ prior_z=-0.18) 不同, 差 0.18m。
+//       与节点 launch 默认 (camera_height_m=-1.0 / cloud_z=0.18 ⇒ prior_z=-0.18) 不同 (prior_z 差 0.57m; 其中 cloud_z 差 0.18m)。
 //   R-6 `--strict`: 质量门未过返回 3、平面无效返回 4 (默认仍恒 0, 不影响既有 diff 流程)。
 //
 // 与节点参数的对齐依据 (2026-10-09 核, 台账见 楔形离线重算_数字表_2026-10-09.md):
@@ -215,7 +216,7 @@ int main(int argc, char** argv) {
         if (!have_cam_h || !have_cloud_z) {
             std::fprintf(stderr,
                 "[warn] 未显式给 %s%s: 当前用**台架默认** cam_h=%.2f cloud_z=%.2f ⇒ prior_z=%.3f; "
-                "节点 launch 默认是 camera_height_m=-1.0 / cloud_z=0.18 ⇒ prior_z=-0.18 (差 0.18m)。"
+                "节点 launch 默认是 camera_height_m=-1.0 / cloud_z=0.18 ⇒ prior_z=-0.18 (prior_z 相差 0.57m; 其中 cloud_z 差 0.18m)。"
                 "要和真机日志逐字段比, 请显式传 (台架矩阵: --cam-h 0.75 --cloud-z 0.0)。\n",
                 have_cam_h ? "" : "--cam-h ", have_cloud_z ? "" : "--cloud-z",
                 cam_h, cloud_z, g.ground_prior_z);
