@@ -121,6 +121,12 @@ target_include_directories(test_heightmap_2d5 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 target_link_libraries(test_heightmap_2d5 PRIVATE Threads::Threads)
 add_test(NAME heightmap_2d5_tests COMMAND test_heightmap_2d5)
 
+# 帧指纹单测 (R-8, 2026-10-12): 确定性/单像素敏感/清洗等价/单步==整体/顺序敏感
+#   纯头文件 (frame_fingerprint.h) ⇒ 无额外源文件、无 Threads 依赖。
+add_executable(test_frame_fingerprint tests/test_frame_fingerprint.cpp)
+target_include_directories(test_frame_fingerprint PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME frame_fingerprint_tests COMMAND test_frame_fingerprint)
+
 # 路径规划单测 (A2, v2.9.19): STOP/REACHED_GOAL 直达零速 + ramp 回归
 add_executable(test_path_planner tests/test_path_planner.cpp path_planner.cpp)
 target_include_directories(test_path_planner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
