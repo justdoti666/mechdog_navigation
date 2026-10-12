@@ -62,11 +62,13 @@ static void test_cleaning_equivalence() {
     CHECK(depth_fingerprint(with_low.data(), with_low.size(), kLo, kHi) ==
           depth_fingerprint(as_zero.data(), as_zero.size(), kLo, kHi));
 
-    std::vector<uint16_t> with_high(32, 1200);
+    // 高值用例必须另起一个干净向量: 复用上一个 as_zero 会把它的 [5]=0 带进来,
+    // 于是两向量在 index 5 上就不同了 (本测试自身曾踩过这个坑, 2026-10-12 修正)。
+    std::vector<uint16_t> with_high(32, 1200), as_zero_high(32, 1200);
     with_high[9] = 9000;    // 高于 hi (8000) ⇒ 按 0
-    as_zero[9] = 0;
+    as_zero_high[9] = 0;
     CHECK(depth_fingerprint(with_high.data(), with_high.size(), kLo, kHi) ==
-          depth_fingerprint(as_zero.data(), as_zero.size(), kLo, kHi));
+          depth_fingerprint(as_zero_high.data(), as_zero_high.size(), kLo, kHi));
 
     // 边界必须保留: lo 与 hi 本身是有效值, 不能和 0 混同
     std::vector<uint16_t> keep_lo(8, 1200), zero_lo(8, 1200);
