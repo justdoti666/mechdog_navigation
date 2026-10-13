@@ -54,6 +54,7 @@
 | 2.5D 单测 | `tests/test_heightmap_2d5.cpp` | 平地/凸起台阶/沟坑/fail-closed (`ctest`，P1.5) |
 | 真机建图工具 | `tools/mapping_real_test.cpp` | Windows 真机验证工具：Astra 真深度→全管线→PGM（静止校验 + 旋转扫描模式） |
 | 楔形离线重算工具 | `tools/wedge_recompute.cpp` | 真机帧（`.raw`/`.npy`）→ 与 `safety_node` 同源管线（strided→base→segment_ground→hm25）→ 输出与节点「感知:」行同格式，供逐字段比对；含**节点同款深度质量门**（坏帧打印 `// [node-abstain]`，避免假分歧）、`--strict`（质量门未过 3 / 平面无效 4）、外参未显式时的 `[warn]`（台架默认与 launch 默认差 0.18 m）。用法见文件头注释 |
+| U-5 放宽单测 | `tests/test_ultrasonic_fall_risk_relax.cpp` | `relax_missing_bottom` 语义矩阵（默认严格 = fail-closed 回归；放宽 ≠ 放纵：真悬崖照停；`ctest`） |
 
 ## 点云模块（P0）
 

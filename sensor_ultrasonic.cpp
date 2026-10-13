@@ -238,6 +238,10 @@ void UltrasonicArrayDriver::bottom_loop() {
 // 与 read_all() 同口径 (注入优先, 过期回退内部); 仅供注入与内部线程读数不一致时
 // 仍以外部上报为准 (否则真机 cliff 判定会落到内部模拟/GPIO 直读上)。
 bool UltrasonicArrayDriver::is_fall_risk() const {
+    // U-5 (2026-10-13): 过渡期放宽开关 (默认 false = 原 fail-closed 语义逐字段不变)。
+    //   relax=true: 仅"有效(valid && finite)且 > 阈值"的真实悬崖读数才判风险;
+    //   "无信息"(无 bottom/未就绪/无效/NaN) 不再拦 —— 仅过渡期台架, 装机禁开。
+    const bool relax = relax_missing_bottom_.load();
     // 方案A: 注入新鲜 -> 用注入 bottom 判定 (与 read_all 同一 timeout 口径)
     {
         std::lock_guard<std::mutex> lk(read_mutex_);   // mutable: const 访问器
@@ -247,16 +251,21 @@ bool UltrasonicArrayDriver::is_fall_risk() const {
             if (age <= inject_timeout_sec_) {
                 const auto& b = external_data_.bottom;
                 // T-B3: 非有限值 = 有风险 (fail-closed; 修复前 NaN 比较为 false -> 误判安全)
+                // U-5: relax 时仅"有效超阈"判风险 (全无效帧不再拦; 真悬崖照停)
+                if (relax) return b.valid && std::isfinite(b.distance_cm) &&
+                                  b.distance_cm > UltrasonicConfig::cliff_threshold_cm;
                 return !b.valid || !std::isfinite(b.distance_cm) ||
                        b.distance_cm > UltrasonicConfig::cliff_threshold_cm;
             }
             // 过期: 回退内部读取 (have_external_ 由 read_all 下一次命中时清零, const 方法不写)
         }
     }
-    if (!bottom_have_.load()) return true;  // 线程未就绪 (启动初/无 bottom 传感器) -> 有风险
+    if (!bottom_have_.load()) return !relax;  // 线程未就绪 (启动初/无 bottom 传感器)
     std::lock_guard<std::mutex> lk(bottom_mutex_);
     const auto& b = bottom_latest_;
-    // T-B3: 同注入路径 —— 非有限值 = 有风险
+    // T-B3: 同注入路径 —— 非有限值 = 有风险 (U-5: relax 时仅有效超阈判风险)
+    if (relax) return b.valid && std::isfinite(b.distance_cm) &&
+                      b.distance_cm > UltrasonicConfig::cliff_threshold_cm;
     return !b.valid || !std::isfinite(b.distance_cm) ||
            b.distance_cm > UltrasonicConfig::cliff_threshold_cm;
 }
