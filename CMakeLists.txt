@@ -127,6 +127,12 @@ add_executable(test_frame_fingerprint tests/test_frame_fingerprint.cpp)
 target_include_directories(test_frame_fingerprint PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME frame_fingerprint_tests COMMAND test_frame_fingerprint)
 
+# U-5 过渡期放宽单测 (2026-10-13): relax_missing_bottom 语义矩阵 (默认关 = fail-closed 回归 + 放宽≠放纵)
+add_executable(test_fall_risk_relax tests/test_ultrasonic_fall_risk_relax.cpp sensor_ultrasonic.cpp)
+target_include_directories(test_fall_risk_relax PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_fall_risk_relax PRIVATE Threads::Threads)
+add_test(NAME fall_risk_relax_tests COMMAND test_fall_risk_relax)
+
 # 路径规划单测 (A2, v2.9.19): STOP/REACHED_GOAL 直达零速 + ramp 回归
 add_executable(test_path_planner tests/test_path_planner.cpp path_planner.cpp)
 target_include_directories(test_path_planner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

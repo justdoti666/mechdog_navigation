@@ -96,6 +96,13 @@ public:
     // 方案A: 外部注入数据新鲜时**优先用注入的 bottom** (与 read_all 同口径: 注入优先, 过期回退内部)。
     bool is_fall_risk() const;
 
+    // U-5 过渡期放宽 (2026-10-13, 会签口径): 默认 false = fail-closed (无数据/无效读数均判有风险)。
+    //   true 时仅"有效(valid && finite)且距离 > cliff_threshold_cm"的真实悬崖读数才判风险;
+    //   "无信息"类 (无 bottom 传感器/线程未就绪/读数无效/NaN) 不再拦 —— **仅过渡期台架**,
+    //   装机禁开 (safety_node 参数 relax_missing_bottom 透传; 运行期不可改, 不入参数白名单)。
+    void set_relax_missing_bottom(bool v) { relax_missing_bottom_.store(v); }
+    bool relax_missing_bottom() const { return relax_missing_bottom_.load(); }
+
     // ALG-1 (v2.2): 取底部最新读数 (供 build_bottom_obstacle 等消费方; 未就绪返回 valid=false)
     UltrasonicReading get_bottom_reading() const;
 
@@ -146,6 +153,7 @@ private:
     mutable std::mutex bottom_mutex_;              // mutable: const 访问器 is_fall_risk/get_bottom_reading 加锁
     UltrasonicReading bottom_latest_{};
     std::atomic<bool> bottom_have_{false};
+    std::atomic<bool> relax_missing_bottom_{false};   // U-5: 过渡期放宽 (默认关 = fail-closed)
 
     void bottom_loop();                            // 20Hz 独立刷新底部读数
     void stop_bottom();                            // 置位 + join (析构/cleanup 调用)
