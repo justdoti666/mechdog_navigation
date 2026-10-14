@@ -76,6 +76,9 @@ struct FusionResult {
     bool        hidden_obstacle_suspect = false;
     std::string hidden_obstacle_dir;           // 触发方向里距离最近的一路 ("left"/"center"/"right"; 无=空)
     double      hidden_obstacle_dist_m  = 0.0; // 该路超声距离 (m; 无触发=0)
+    // A 行为挂接 (v2.9.25): 触发 且 减速开关打开 时为 true —— planner 据此把前进速度封顶
+    //   ≤SLOW 档 (HiddenObstacleActionConfig::speed_scale)。开关默认关 ⇒ 恒 false (逐位一致)。
+    bool        hidden_slowdown = false;
 };
 
 /** A (v2.9.24): 单方向"隐身障碍"评估结果 (纯函数输出; 诊断字段供日志/单测) */
@@ -134,6 +137,14 @@ public:
     void set_depth_degraded(bool on) { depth_degraded_.store(on, std::memory_order_relaxed); }
     bool depth_degraded() const { return depth_degraded_.load(std::memory_order_relaxed); }
 
+    /**
+     * A 行为挂接 (v2.9.25): 隐身障碍减速开关 (由上位机参数 hidden_slow_enable 驱动, 默认关)。
+     * on=true: 触发 (hidden_obstacle_suspect) 期间 planner 前进限速 ≤ SLOW 档;
+     * 默认 false ⇒ 与接入前行为逐位一致 (回归安全)。报警通道不受此开关影响 (触发即报警)。
+     */
+    void set_hidden_slowdown(bool on) { hidden_slowdown_enabled_.store(on, std::memory_order_relaxed); }
+    bool hidden_slowdown_enabled() const { return hidden_slowdown_enabled_.load(std::memory_order_relaxed); }
+
 private:
     // 单元测试访问 (tests/test_fusion.cpp 专用, R-3: 测试调用真函数而非复刻逻辑)
     friend class SensorFusionTestAccess;
@@ -150,6 +161,8 @@ private:
     std::atomic<bool> ultrasonic_enabled_{true};
     // S1 (N2): 降级链开关 (由 set_depth_degraded 驱动; T-A1: 跨线程 → relaxed 原子)
     std::atomic<bool> depth_degraded_{false};
+    // A 行为挂接 (v2.9.25): 隐身障碍减速开关 (由 set_hidden_slowdown 驱动; 跨线程 → relaxed 原子, 同 S1)
+    std::atomic<bool> hidden_slowdown_enabled_{false};
     // A (v2.9.24): 近期 2.5D 快照 (set_local_terrain 注入, clear_local_terrain 清空)。
     //   fuse() 里做"超声 × 深度"跨层比较用; valid=false / 未注入时 A 检测整体不启用。
     HeightMap25Result terrain_hm_;

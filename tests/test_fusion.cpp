@@ -1252,26 +1252,38 @@ static void test_hidden_obstacle_fuse_integration() {
     inj.front_center.distance_cm = 100.0;
 
     // ① 地形快照 = 深度沉默 ⇒ fuse() 上报可疑: 方向=正前 / 距离=1.0m
+    //    A 行为挂接 (v2.9.25): 减速开关默认关 ⇒ 触发也不减速 (回归锁定)
     fusion.set_local_terrain(make_hm25_blank(), no_neg);
     ultrasonic.inject_external_data(inj);
     auto r1 = fusion.fuse();
     CHECK(r1.hidden_obstacle_suspect == true);
     CHECK(r1.hidden_obstacle_dir == "center");
     CHECK(std::abs(r1.hidden_obstacle_dist_m - 1.0) < 1e-9);
+    CHECK(r1.hidden_slowdown == false);      // 默认关 ⇒ 恒 false (接入前行为)
 
-    // ② 深度同带内看到障碍 ⇒ 不可疑 (字段回滚干净)
+    // ①b 开关开 + 触发 ⇒ hidden_slowdown = true (减速透出; planner 侧消费)
+    fusion.set_hidden_slowdown(true);
+    ultrasonic.inject_external_data(inj);
+    auto r1b = fusion.fuse();
+    CHECK(r1b.hidden_obstacle_suspect == true);
+    CHECK(r1b.hidden_slowdown == true);
+
+    // ② 深度同带内看到障碍 ⇒ 不可疑 (字段回滚干净; 开关虽开, 未触发 ⇒ 不减速)
     fusion.set_local_terrain(make_hm25_cell(1.0, 0.0, CellFlag::ObstacleUp), no_neg);
     ultrasonic.inject_external_data(inj);   // 刷新注入新鲜度
     auto r2 = fusion.fuse();
     CHECK(r2.hidden_obstacle_suspect == false);
     CHECK(r2.hidden_obstacle_dir.empty());
     CHECK(r2.hidden_obstacle_dist_m == 0.0);
+    CHECK(r2.hidden_slowdown == false);
 
     // ③ clear_local_terrain ⇒ A 检测停用 (接入前行为)
     fusion.clear_local_terrain();
     ultrasonic.inject_external_data(inj);
     auto r3 = fusion.fuse();
     CHECK(r3.hidden_obstacle_suspect == false);
+    CHECK(r3.hidden_slowdown == false);
+    fusion.set_hidden_slowdown(false);       // 卫生: 复位开关
 }
 
 int main() {

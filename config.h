@@ -222,6 +222,19 @@ struct HiddenObstacleConfig {
 };
 
 // ============================================================
+// A 行为挂接 (v2.9.25): 隐身障碍触发 ⇒ "报警 + 减速" —— 减速档位参数
+// ============================================================
+// 口径 (2026-10-14 发起人定): 档位 = 现有 SLOW 档; 无迟滞; 默认关。
+//   · 开关: SensorFusion::set_hidden_slowdown (上位机参数 hidden_slow_enable, 默认 false);
+//     false = 纯观测 (只报警), true = 触发 (hidden_obstacle_suspect) 期间前进限速 ≤ 本档。
+//   · 消费点: path_planner.cpp —— 与 S1 退化期限速同一位置/写法 (ramp 之后硬上限);
+//     FusionResult::hidden_slowdown = 开关 && 触发 (默认关 ⇒ 恒 false = 接入前行为逐位一致)。
+//   · 单测: tests/test_path_planner.cpp (默认关回归/限速/解除/急停优先/叠加) / test_fusion.cpp (透出)。
+struct HiddenObstacleActionConfig {
+    static constexpr double speed_scale = 0.5;   // 前进限速上限 = 50% v_max (= SLOW 档 0.10 m/s)
+};
+
+// ============================================================
 // 环境判定统一阈值 (ALG-3 v2.2: 深度代理与红外同源, 消除双轨)
 // ============================================================
 // TSL2591 已取消购买 (见 docs/FIX_PLAN.md F3 决策), 环境光强判定默认走

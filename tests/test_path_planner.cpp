@@ -185,6 +185,87 @@ static void test_reverse_zero_crossing_gate_symmetric() {
     }
 }
 
+// ===== A 行为挂接 (v2.9.25): 隐身障碍触发 → 前进限速 ≤SLOW (默认关) =====
+// T13: 默认关 (hidden_slowdown=false) + 触发标志: 行为与接入前逐位一致 (回归锁定)
+static void test_hidden_slow_default_off() {
+    PathPlanner p;
+    FusionResult fr = with_action(NavigationAction::FORWARD);
+    fr.hidden_obstacle_suspect = true;      // 触发 (但减速标志未开 = 默认口径)
+    VelocityCmd c;
+    for (int i = 0; i < 10; ++i) c = p.plan(fr);
+    CHECK(std::fabs(c.linear - PlannerConfig::max_linear_velocity) < kEps);  // 仍到满速 0.20
+}
+
+// T14: 减速开 + 触发 ⇒ 前进封顶 SLOW 档; 满速切入首步即 ≤cap (与 T10 同款硬上限语义)
+static void test_hidden_slow_caps() {
+    PathPlanner p;
+    const double cap = PlannerConfig::max_linear_velocity * HiddenObstacleActionConfig::speed_scale;
+    for (int i = 0; i < 10; ++i) p.plan(with_action(NavigationAction::FORWARD));  // 稳态 0.20
+    FusionResult fr = with_action(NavigationAction::FORWARD);
+    fr.hidden_obstacle_suspect = true;
+    fr.hidden_slowdown = true;
+    VelocityCmd c = p.plan(fr);
+    CHECK(c.linear <= cap + kEps);           // 首步不得越限
+    CHECK(std::fabs(c.linear - cap) < 1e-9); // 且一步到位 = 0.10
+    for (int i = 0; i < 5; ++i) {
+        c = p.plan(fr);
+        CHECK(c.linear <= cap + kEps);       // 持续触发期间恒不越限
+    }
+}
+
+// T15: 触发消失 (hidden_slowdown 复位) ⇒ 经 ramp 平滑升回 v_max
+static void test_hidden_slow_release_restores() {
+    PathPlanner p;
+    FusionResult fr = with_action(NavigationAction::FORWARD);
+    fr.hidden_obstacle_suspect = true;
+    fr.hidden_slowdown = true;
+    for (int i = 0; i < 8; ++i) p.plan(fr);
+    fr.hidden_obstacle_suspect = false;
+    fr.hidden_slowdown = false;
+    VelocityCmd c;
+    for (int i = 0; i < 4; ++i) c = p.plan(fr);
+    CHECK(std::fabs(c.linear - PlannerConfig::max_linear_velocity) < kEps);
+}
+
+// T16: 减速期 STOP 仍直达零速 (急停优先); 转向/后退线速度不受限 (本就低于 cap)
+static void test_hidden_slow_stop_and_others() {
+    PathPlanner p;
+    FusionResult st = with_action(NavigationAction::STOP);
+    st.hidden_obstacle_suspect = true;
+    st.hidden_slowdown = true;
+    VelocityCmd c = p.plan(st);
+    CHECK(std::fabs(c.linear) < kEps && std::fabs(c.angular) < kEps);
+
+    PathPlanner p2;
+    FusionResult tr = with_action(NavigationAction::TURN_RIGHT);
+    tr.hidden_obstacle_suspect = true;
+    tr.hidden_slowdown = true;
+    for (int i = 0; i < 8; ++i) c = p2.plan(tr);
+    CHECK(std::fabs(c.linear - PlannerConfig::max_linear_velocity * 0.2) < kEps);   // 0.04 不受限
+
+    PathPlanner p3;
+    FusionResult bk = with_action(NavigationAction::BACKWARD);
+    bk.hidden_obstacle_suspect = true;
+    bk.hidden_slowdown = true;
+    for (int i = 0; i < 8; ++i) c = p3.plan(bk);
+    CHECK(std::fabs(c.linear - (-PlannerConfig::max_linear_velocity * 0.4)) < kEps); // -0.08 不受限
+}
+
+// T17: 与 S1 叠加 —— 双开取严; 只解除 S1 (A 仍开) ⇒ 不放松 (仍 ≤cap)
+static void test_hidden_slow_stacks_with_s1() {
+    PathPlanner p;
+    FusionResult fr = with_action(NavigationAction::FORWARD);
+    fr.depth_degraded = true;
+    fr.hidden_obstacle_suspect = true;
+    fr.hidden_slowdown = true;
+    const double cap = PlannerConfig::max_linear_velocity * DegradedPolicyConfig::speed_scale;
+    VelocityCmd c;
+    for (int i = 0; i < 8; ++i) { c = p.plan(fr); CHECK(c.linear <= cap + kEps); }   // 双开取严
+    fr.depth_degraded = false;                       // 只解除 S1, A 仍开
+    for (int i = 0; i < 8; ++i) { c = p.plan(fr); CHECK(c.linear <= cap + kEps); }   // 不放松
+    CHECK(std::fabs(c.linear - cap) < 1e-9);
+}
+
 int main() {
     std::cout << "== path planner (A2) tests ==" << std::endl;
     test_stop_is_immediate();
@@ -199,6 +280,11 @@ int main() {
     test_degraded_cap_from_cruise();      // T-A2a: 满速切入降级首步不越限
     test_reverse_zero_crossing_gate();            // v2.9.23 (批B A2残): 反向零穿越 (FORWARD→BACKWARD)
     test_reverse_zero_crossing_gate_symmetric();  // v2.9.23 (批B A2残): 对称 (BACKWARD→FORWARD)
+    test_hidden_slow_default_off();      // A 行为挂接: 默认关回归 (触发也不减速)
+    test_hidden_slow_caps();             // A 行为挂接: 触发 ⇒ 前进限速 ≤SLOW
+    test_hidden_slow_release_restores(); // A 行为挂接: 解除复原
+    test_hidden_slow_stop_and_others();  // A 行为挂接: 急停优先 / 转向后退不受限
+    test_hidden_slow_stacks_with_s1();   // A 行为挂接: 与 S1 叠加取严
     std::cout << "\n" << g_checks << " checks, " << g_fail << " failed\n" << std::endl;
     return g_fail ? 1 : 0;
 }
