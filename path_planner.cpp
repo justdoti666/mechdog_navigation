@@ -43,6 +43,12 @@ VelocityCmd PathPlanner::plan(const FusionResult& fusion) {
         const double v_cap = PlannerConfig::max_linear_velocity * DegradedPolicyConfig::speed_scale;
         if (target.linear > v_cap) target.linear = v_cap;
     }
+    // A 行为挂接 (v2.9.25): 隐身障碍触发 ⇒ 前进限速 —— 与 S1 同一位置/同一写法 (ramp 之后硬上限)。
+    //   默认关 (hidden_slowdown 恒 false) ⇒ 本块恒不生效 = 接入前行为逐位一致。
+    if (fusion.hidden_slowdown) {
+        const double v_cap_a = PlannerConfig::max_linear_velocity * HiddenObstacleActionConfig::speed_scale;
+        if (target.linear > v_cap_a) target.linear = v_cap_a;
+    }
     last_linear_  = target.linear;
     last_angular_ = target.angular;
     return target;

@@ -87,6 +87,11 @@ FusionResult SensorFusion::fuse() {
         }
     }
 
+    // 4.6 A 行为挂接 (v2.9.25): 减速标志 = 开关 && 触发 (默认关 ⇒ 恒 false, 接入前行为逐位一致)。
+    //   消费点: path_planner.cpp (与 S1 同位置硬上限); 口径见 config.h HiddenObstacleActionConfig。
+    result.hidden_slowdown = hidden_slowdown_enabled_.load(std::memory_order_relaxed) &&
+                             result.hidden_obstacle_suspect;
+
     // 5. 底部悬崖检测（仅超声波）
     // ALG-1 (v2.2): 改用 is_fall_risk() —— 独立 20Hz bottom 线程的 fail-closed 判定,
     // 不再依赖同周期 read_all 的 bottom (后者现仅为缓存值, 供 build_bottom_obstacle 用)
