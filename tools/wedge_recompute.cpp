@@ -26,12 +26,21 @@
 //   R-5 外参显式性: `--cam-h`/`--cloud-z` 未显式给出时打印 `[warn]` —— 台架默认 (0.75 / 0.0)
 //       与节点 launch 默认 (camera_height_m=-1.0 / cloud_z=0.18 ⇒ prior_z=-0.18) 不同 (prior_z 差 0.57m; 其中 cloud_z 差 0.18m)。
 //   R-6 `--strict`: 质量门未过返回 3、平面无效返回 4 (默认仍恒 0, 不影响既有 diff 流程)。
+//   R-8 帧身份 (2026-10-12): 输出行尾部追加 `| 帧fp=<8位hex>` —— 与节点「感知:」行的同名字段
+//       **逐字符可比** (同一 core 实现 `frame_fingerprint.h`、同一清洗口径 lo/hi)。
+//       另给 `--expect-fp <8hex>`: 与实算不符 ⇒ 打印 [fail] 并返回 **6** (硬断言"是同一帧")。
+//       注意: 加上该字段后, 旧的存证输出 (无 `| 帧fp=`) 与新输出**不再逐字符相同** ——
+//       比对方式见 tools/wedge_compare.py (优先按指纹配对, 指纹缺失时回落"点数唯一")。
 //
 // 与节点参数的对齐依据 (2026-10-09 核, 台账见 楔形离线重算_数字表_2026-10-09.md):
 //   step=8 (cloud_downsample_step 默认);  K=[570.3422047415297129,319.5,239.5] (pi_replay 同款),
 //   min/max=0.6/8.0 (AstraProConfig);  地面先验 = -(cam_h - cloud_z) (sensor_geometry.hpp),
 //   gseg = GroundSegParams 默认 + use_cell_min_fit=true + cell_skip_ransac=true (节点 ground_fit_method=cell);
 //   wedge_only=true (节点 grid_wedge_only 默认 true)。
+//   ★ K 口径坑 (2026-10-15 实测): 节点内参有**两个来源** —— 话题 /camera/depth/camera_info
+//     (优先, pi_replay.py 会发) 与 FOV 反推兜底 (fx=572.7/fy=572.3/cx=320.0/cy=240.0, point_cloud.h:50)。
+//     回放灌帧**必须发布 camera_info**, 否则节点落到兜底内参 ⇒ 与本工具硬编码 K 不同 ⇒
+//     平面拟合**假分歧** (同帧实测: 兜底 tilt=8.93°/内点221 vs 对齐后 2.46°/268; 含 fp 全行仍差)。
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
@@ -47,6 +56,7 @@
 #include "point_cloud.h"
 #include "ground_segmentation.h"
 #include "heightmap_2d5.h"
+#include "frame_fingerprint.h"   // R-8: 帧指纹 (与节点 safety_node 共用同一实现)
 
 using namespace mechdog;
 
@@ -116,6 +126,7 @@ int main(int argc, char** argv) {
     double cam_h = 0.75, cloud_z = 0.0, cloud_x = 0.12, prior_window = 0.10;
     double prior_z_override = -999.0;
     int step = 8, wedge_only = 1;
+    std::string expect_fp;                             // R-8: --expect-fp (空=不断言)
     bool strict = false;                              // R-6: 严格退出码
     bool have_cam_h = false, have_cloud_z = false;    // R-5: 是否显式给出外参
     // 2026-10-11: 改为逐项解析 —— 支持无值开关 (--strict), 且缺值/未知参数一律显式报错
@@ -134,6 +145,7 @@ int main(int argc, char** argv) {
         else if (k == "--step") step = std::atoi(val("--step"));
         else if (k == "--wedge-only") wedge_only = std::atoi(val("--wedge-only"));
         else if (k == "--prior-z") prior_z_override = std::atof(val("--prior-z"));
+        else if (k == "--expect-fp") expect_fp = val("--expect-fp");
         else if (k == "--strict") strict = true;
         else { std::fprintf(stderr, "未知参数: %s\n", k.c_str()); return 2; }
     }
@@ -161,6 +173,10 @@ int main(int argc, char** argv) {
                         "不打「感知:」行**; 下一行仅为离线诊断, 不可与节点日志比对\n",
                         static_cast<int>(qissue), valid_ratio * 100.0, valid_px);
         }
+
+        // ---- R-8 (2026-10-12): 帧指纹 (与节点同一实现/同一清洗口径 ⇒ 指纹相同即同帧) ----
+        const uint64_t fp = depth_fingerprint(depth.data(), depth.size(), dlo, dhi);
+        const std::string fp_hex = depth_fingerprint_hex(fp);
 
         // ---- 与节点同源: K (pi_replay 同款) / 外参 / 先验 ----
         CameraIntrinsics K;
@@ -193,8 +209,8 @@ int main(int argc, char** argv) {
         HeightMap25Result hm;
         build_heightmap_25(cloud_base, seg, hcfg, hm);
 
-        // ---- 与节点 safety_node.cpp 同一格式输出 (逐字段可比) ----
-        std::printf("感知: 点云=%zu 平面valid=%d tilt=%.2f° [n=(%.3f,%.3f,%.3f) 分量 %.2f°/%.2f°] h0=%.3fm 内点=%zu neg=%zu fit=%s | 2.5D %s\n",
+        // ---- 与节点 safety_node.cpp 同一格式输出 (逐字段可比; 尾部 `| 帧fp=` 为 R-8 帧身份) ----
+        std::printf("感知: 点云=%zu 平面valid=%d tilt=%.2f° [n=(%.3f,%.3f,%.3f) 分量 %.2f°/%.2f°] h0=%.3fm 内点=%zu neg=%zu fit=%s | 2.5D %s | 帧fp=%s\n",
             cloud_base.points.size(), static_cast<int>(seg.plane.valid),
             std::acos(std::min(1.0, std::max(-1.0, static_cast<double>(seg.plane.nz)))) * 180.0 / kPi,
             static_cast<double>(seg.plane.nx), static_cast<double>(seg.plane.ny),
@@ -204,14 +220,24 @@ int main(int argc, char** argv) {
             static_cast<double>(seg.plane.height_at_origin()),
             static_cast<size_t>(seg.plane.inliers), seg.negative_points.size(),
             (seg.used_ransac ? "ransac" : (seg.used_cell ? "cell" : "none")),
-            hm.valid ? hm.stats().c_str() : "invalid (无平面→fail-closed, 路1 静默)");
+            hm.valid ? hm.stats().c_str() : "invalid (无平面→fail-closed, 路1 静默)",
+            fp_hex.c_str());
         // 诊断附行 (不参与逐字段 diff)
         std::printf("// 回算: pitch=%.6f° (%.10f rad) cam_h=%.2f cloud_z=%.2f prior_z=%.3f step=%d wedge_only=%d | used_cell=%d used_ransac=%d ransac_iters=%d\n",
             static_cast<double>(E.pitch) * 180.0 / kPi, static_cast<double>(E.pitch), cam_h, cloud_z, g.ground_prior_z, step, wedge_only,
             static_cast<int>(seg.used_cell), static_cast<int>(seg.used_ransac), seg.ransac_iters);
-        std::printf("// 质量门: valid=%.1f%% / %zu px ⇒ %s (issue=%d)\n",
+        std::printf("// 质量门: valid=%.1f%% / %zu px ⇒ %s (issue=%d) | 帧fp=%s (R-8, FNV-1a/8hex)\n",
             valid_ratio * 100.0, valid_px,
-            qok ? "pass" : "ABSTAIN(节点本轮不打感知行)", static_cast<int>(qissue));
+            qok ? "pass" : "ABSTAIN(节点本轮不打感知行)", static_cast<int>(qissue),
+            fp_hex.c_str());
+        // R-8 (2026-10-12): 可选硬断言 —— 与节点日志里的 `帧fp=` 一致才继续
+        if (!expect_fp.empty() && expect_fp != fp_hex) {
+            std::fprintf(stderr,
+                "[fail] 帧指纹不符 (R-8): 期望 %s, 实算 %s ⇒ 算的**不是同一帧**; "
+                "请核对帧文件与节点日志的 `帧fp=` 字段\n",
+                expect_fp.c_str(), fp_hex.c_str());
+            return 6;
+        }
         // R-5 (2026-10-11): 外参默认值属"台架口径", 与节点 launch 默认不同 ⇒ 未显式给出时明确告警
         if (!have_cam_h || !have_cloud_z) {
             std::fprintf(stderr,

@@ -2,6 +2,7 @@
  * Astra Pro 深度相机驱动模块实现
  */
 #include "sensor_astra.h"
+#include "frame_fingerprint.h"   // R-8: 帧指纹 (与离线工装共用同一实现)
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -270,6 +271,11 @@ AstraFrame AstraProDriver::capture_real() {
                                          frame.depth_height, "right");
     // v2.9.10: 补上精确有效像素数(SDK 路径; 话题路径由 inject_depth_frame 顺带算出)
     frame.valid_pixel_count = count_valid_pixels(frame.depth_map);
+    // R-8 (2026-10-12): SDK 路径的帧指纹 —— 此路径没有可搭车的既有单遍循环 ⇒ 单独一遍
+    //   (depth_map 已按同规则清洗, 用同规则重算幂等; 口径与话题路径一致)。
+    frame.fingerprint = depth_fingerprint(frame.depth_map.data(), frame.depth_map.size(),
+                                          static_cast<uint16_t>(MIN_VALID_DISTANCE_MM),
+                                          static_cast<uint16_t>(MAX_VALID_DISTANCE_MM));
 
     // 环境判定: 深度图无效像素比例代理 (ALG-3 v2.2: ambient_light_level 改局部变量, 不再存帧字段)
     double ambient_light = estimate_ambient_light(frame.depth_map,
@@ -493,6 +499,7 @@ bool AstraProDriver::inject_depth_frame(const std::vector<uint16_t>& depth_map,
         std::vector<double> vals;
     } ac, al, ar;
     size_t valid_all = 0;
+    uint64_t fp = kFingerprintOffsetBasis;        // R-8: 帧指纹在同一次清洗里顺带累加
     for (int y = 0; y < height; ++y) {
         const uint16_t* row = depth_map.data() + static_cast<size_t>(y) * width;
         uint16_t* orow = frame.depth_map.data() + static_cast<size_t>(y) * width;
@@ -502,6 +509,7 @@ bool AstraProDriver::inject_depth_frame(const std::vector<uint16_t>& depth_map,
             const bool ok = (v >= static_cast<uint16_t>(MIN_VALID_DISTANCE_MM) &&
                              v <= static_cast<uint16_t>(MAX_VALID_DISTANCE_MM));
             orow[x] = ok ? v : 0;
+            fp = depth_fingerprint_step(fp, orow[x]);   // 清洗后值(无效=0), 与工装同规则
             if (!ok) continue;
             ++valid_all;
             if (!y_in) continue;
@@ -512,6 +520,7 @@ bool AstraProDriver::inject_depth_frame(const std::vector<uint16_t>& depth_map,
         }
     }
     frame.valid_pixel_count = valid_all;          // v2.9.10: 精确有效像素数(供节点免再扫一遍全图)
+    frame.fingerprint       = fp;                 // R-8: 帧指纹(同一次扫描, 零额外开销)
     auto region_from = [&](const Acc& a, int total) {
         DepthRegion reg;
         reg.valid_pixel_ratio = total > 0 ? static_cast<double>(a.n) / total : 0.0;
