@@ -40,21 +40,22 @@
 | 超声波驱动 | `sensor_ultrasonic.h/.cpp` | HC-SR04 驱动，4 颗分时轮询防串扰（含模拟模式；`USE_WIRINGPI` 真机模式先 `wiringPiSetupGpio` 检查，失败诚实降级；v2.9.21：非有限距离 fail-closed；v2.9.23：注入值域消毒，量程 [2,400]cm 外判无效） |
 | 深度相机驱动 | `sensor_astra.h/.cpp` | Astra Pro 驱动，通过 Orbbec Astra SDK 获取深度图（含模拟模式；真机经 `USE_ASTRA_SDK` 编译） |
 | 红外强度驱动 | `sensor_ir.h/.cpp` | TSL2591 环境红外检测，用于环境自适应权重（含模拟模式） |
-| 传感器融合 | `sensor_fusion.h/.cpp` | 分层加权融合、环境自适应、障碍物分类、导航决策（v2.9.20 退化期降级链 S1：`set_depth_degraded` 反应线收紧 10/25/50→20/40/70cm；v2.9.21：超声/降级开关原子化（跨线程安全），非有限输入判 CRITICAL；v2.9.23 (批B N6)：负障碍点（坑）单独记账，命中即 STOP，不被凸起分级降级） |
+| 传感器融合 | `sensor_fusion.h/.cpp` | 分层加权融合、环境自适应、障碍物分类、导航决策（v2.9.20 退化期降级链 S1：`set_depth_degraded` 反应线收紧 10/25/50→20/40/70cm；v2.9.21：超声/降级开关原子化（跨线程安全），非有限输入判 CRITICAL；v2.9.23 (批B N6)：负障碍点（坑）单独记账，命中即 STOP，不被凸起分级降级；A 批：超声×2.5D **交叉层隐身障碍**检测（镜面/透明，纯观测）+ 减速开关 `set_hidden_slowdown`（默认关）） |
 | 点云模块 | `point_cloud.h/.cpp` | 深度图→3D 点云反投影、光学系→link 系坐标变换（P0，供规划/建图预留，独立于融合层） |
 | 地面分割 | `ground_segmentation.h/.cpp` | 受约束 RANSAC 地面平面（可选 `cell` 确定性最小拟合；`cell_skip_ransac` 默认让 cell 成功时跳过 RANSAC，v2.9.16）+ 2.5D 栅格**负障碍检测**（坑/下行台阶，P1；门口试金石单测锁定；v2.9.23 (批B B7残)：RANSAC 早退分母改候选集口径 + `ransac_iters` 观测字段） |
 | 建图模块 | `mapping.h/.cpp` | 位姿驱动点云累积 → log-odds 占据栅格 + 光线空闲 + 膨胀 + PGM 导出（P4） |
 | 2.5D 近场地形 | `heightmap_2d5.h/.cpp` | 单平面 2.5D 高程/可通行地形 → 越障判断（能走/凸起/沟坑/太陡，P1.5；复用 P1 地面平面） |
 | 日志系统 | `logger.h` | 分级日志 DEBUG/INFO/WARN/ERROR + 时间戳 + 可选写文件（header-only，零依赖） |
-| 路径规划 | `path_planner.h/.cpp` | 导航动作 -> 速度指令映射（STOP/REACHED_GOAL 直达零速，其余经 ramp 平滑；v2.9.20 S1：降级期前进限速≤SLOW，v2.9.21 改为 ramp 后**硬上限**（首步不越限）；v2.9.23 (批B A2残)：方向反转零穿越闸门（反向命令首步到零，消除同向速度残留）；DWA 待实现） |
+| 路径规划 | `path_planner.h/.cpp` | 导航动作 -> 速度指令映射（STOP/REACHED_GOAL 直达零速，其余经 ramp 平滑；v2.9.20 S1：降级期前进限速≤SLOW，v2.9.21 改为 ramp 后**硬上限**（首步不越限）；v2.9.23 (批B A2残)：方向反转零穿越闸门（反向命令首步到零，消除同向速度残留）；A 行为挂接（2026-10-14）：隐身障碍触发期前进限速≤SLOW（同款硬上限，默认关）；DWA 待实现） |
 | 单元测试 | `tests/test_fusion.cpp` | F4/F5 回归 + 融合逻辑验证 (`ctest`) |
 | 点云单测 | `tests/test_point_cloud.cpp` | 反投影/坐标变换/失效哨兵验证 (`ctest`，P0) |
 | 地面分割单测 | `tests/test_ground_segmentation.cpp` | 平地/坑/台阶/门口试金石/倾斜/退化输入/`cell_skip_ransac` 新旧行为（`ctest`，P1） |
 | 建图单测 | `tests/test_mapping.cpp` | 坐标换算/占空判定/位姿变换/多帧累积/动态清障/膨胀/PGM (`ctest`，P4，113 运行期断言) |
 | 2.5D 单测 | `tests/test_heightmap_2d5.cpp` | 平地/凸起台阶/沟坑/fail-closed (`ctest`，P1.5) |
 | 真机建图工具 | `tools/mapping_real_test.cpp` | Windows 真机验证工具：Astra 真深度→全管线→PGM（静止校验 + 旋转扫描模式） |
-| 楔形离线重算工具 | `tools/wedge_recompute.cpp` | 真机帧（`.raw`/`.npy`）→ 与 `safety_node` 同源管线（strided→base→segment_ground→hm25）→ 输出与节点「感知:」行同格式，供逐字段比对；含**节点同款深度质量门**（坏帧打印 `// [node-abstain]`，避免假分歧）、`--strict`（质量门未过 3 / 平面无效 4）、外参未显式时的 `[warn]`（台架默认与 launch 默认差 0.18 m）。用法见文件头注释 |
+| 楔形离线重算工具 | `tools/wedge_recompute.cpp` | 真机帧（`.raw`/`.npy`）→ 与 `safety_node` 同源管线（strided→base→segment_ground→hm25）→ 输出与节点「感知:」行同格式，供逐字段比对；含**节点同款深度质量门**（坏帧打印 `// [node-abstain]`，避免假分歧）、`--strict`（质量门未过 3 / 平面无效 4）、外参未显式时的 `[warn]`（台架默认与 launch 默认差 0.18 m）；**R-8（2026-10-15）**：输出行尾 `| 帧fp=<8hex>`、`--expect-fp` 不符 rc=6（与节点「感知:」行自证同帧）；配套 `tools/wedge_compare.py` 按指纹配对（节流重复自动去重）。用法见文件头注释 |
 | U-5 放宽单测 | `tests/test_ultrasonic_fall_risk_relax.cpp` | `relax_missing_bottom` 语义矩阵（默认严格 = fail-closed 回归；放宽 ≠ 放纵：真悬崖照停；`ctest`） |
+| 帧指纹单测 | `tests/test_frame_fingerprint.cpp` | R-8：FNV-1a 64 帧指纹语义（逐像素显式拆字节 ⇒ 与主机端序无关；清洗口径 lo≤v≤hi 保留否则 0；空帧）（`ctest`，24 checks） |
 
 ## 点云模块（P0）
 
@@ -281,9 +282,10 @@ cmake --build . --target test_fusion test_point_cloud
 ctest --output-on-failure
 ```
 
-- `test_fusion` — 融合层回归（752 运行期断言）
+- `test_fusion` — 融合层回归（794 运行期断言，含 A 批隐身障碍×减速开关用例）
 - `test_point_cloud` — 点云模块 P0（反投影几何/内参/坐标变换/失效哨兵/轴约定，12 测试函数，30.7 万运行期断言）
-- `test_ground_segmentation` — 地面分割（153 运行期断言）/ `test_mapping` — 建图（113）/ `test_heightmap_2d5` — 2.5D（51）/ `test_path_planner` — 动作→速度映射（34）
+- `test_ground_segmentation` — 地面分割（153 运行期断言）/ `test_mapping` — 建图（113）/ `test_heightmap_2d5` — 2.5D（51）/ `test_path_planner` — 动作→速度映射（74）
+- `test_frame_fingerprint` — R-8 帧指纹（24 checks：端序无关 / 清洗口径 / 空帧）
 
 > 断言数为**运行期计数**口径（WSL/Windows 两平台均 0 失败）；与"行首 CHECK 字面行数"是两套口径，引用时勿混用。
 
