@@ -289,6 +289,35 @@ ctest --output-on-failure
 
 > 断言数为**运行期计数**口径（WSL/Windows 两平台均 0 失败）；与"行首 CHECK 字面行数"是两套口径，引用时勿混用。
 
+## 离线重算与帧指纹配对（R-8）
+
+**要回答的问题**：离线工装重算的，是不是节点当时看到的那一帧？（旧做法只靠"点云数在日志里唯一"**间接**论证。）
+
+- `frame_fingerprint.h` — FNV-1a 64（逐像素**显式拆字节** ⇒ 与主机端序无关；清洗口径 `lo≤v≤hi` 保留否则 0）；单测 `test_frame_fingerprint`（24 checks）
+- `tools/wedge_recompute.cpp` — 真机帧 → 节点同源管线；输出行尾 `| 帧fp=<8hex>`；`--expect-fp <hex>` 不符 **rc=6**（脚本可断言"算的就是这一帧"）
+- `tools/wedge_compare.py` — 按帧指纹给「节点日志 ⇔ 离线输出」配对后**逐字符**比整行；3000ms 节流的同内容重复行自动去重，只把 **≥2 种不同行**判为歧义（无 fp 的旧存证回落"点云数唯一"并标注为间接论证）
+
+**★ 对齐前提（2026-10-15 实测定根因）**：回放灌帧必须**同时发布** `/camera/depth/image_raw` **与** `/camera/depth/camera_info`。只发前者时节点落 FOV 反推兜底内参（`fx=572.7 / cx=320.0`，`point_cloud.h:50`），与工装/`pi_replay.py` 的台架 K（`570.3422047415297129 / 319.5`）几何不同 ⇒ **同一帧**平面拟合出不同解（实测 tilt 8.93° / 内点 221 vs 2.46° / 268）——这是**假分歧**，不是工具缺陷。补发 camera_info 后节点日志出现「深度内参已从话题读取」，整行与工装逐字符一致。
+
+**整链路复跑（WSL jazzy，2026-10-15 实测全绿）**：
+
+```bash
+# 1) 离线侧：同帧同参数（台架口径）算一行
+g++ -std=c++17 -O2 -I . tools/wedge_recompute.cpp point_cloud.cpp ground_segmentation.cpp heightmap_2d5.cpp -o /tmp/wedge_fp
+/tmp/wedge_fp <帧>/real_depth.raw --pitch-rad 0.2618 --cam-h 0.75 --cloud-z 0.0 --step 8 --wedge-only 1
+#   行尾即 `| 帧fp=<8hex>`；同帧换 --pitch/--step 指纹不变，换帧必变；--expect-fp 不符 rc=6
+
+# 2) 节点侧：两包一起编（ros 依赖 mechdog_ultrasonic 消息包，--packages-select 单包会死在 find_package）
+colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release -DMECHDOG_ALGO_DIR="<core 仓路径>"
+#    灌帧发 image_raw + camera_info（同款 K）→ 跑 safety_node（camera_height_m/cloud_z/cloud_pitch_rad
+#    须与工装一致）→ 取日志末条「感知:」行的 `帧fp=`
+
+# 3) 配对断言：节点 fp == 工装 fp，且 wedge_compare.py 逐字符一致（rc=0）
+python3 tools/wedge_compare.py --dir <证据目录> --offline-glob final_
+```
+
+> 端到端实测（2026-10-15，floor_1617）：节点与工装 `帧fp=0a08cd7d` 相同 + 整行逐字符一致 + `wedge_compare` rc=0（10 次节流重复正确去重）。
+
 ## 构建
 
 ```bash
