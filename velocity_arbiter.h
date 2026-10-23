@@ -12,6 +12,9 @@
  *      (唯一例外: 输出归零)。
  *   ② 不产生动作 —— 感知层的 TURN/BACKWARD 只用于"禁止前进分量",
  *      绝不会自己生成转向或后退指令 (那是 Nav2 的职责)。
+ *      注: determine_action 里 TURN/BACKWARD 只会在 min_fwd ≤ 50cm 时出现
+ *      (STOP ≤10cm / BACKWARD ≤25cm / TURN ≤50cm), 所以"禁止前进"不会变成
+ *      远距离误刹; 50cm 以内侧向有障碍本来就不该继续按原速往前推。
  *   ③ 不引入新阈值 —— 只消费 FusionResult 既有语义 (recommended_action /
  *      cliff_detected / sensors_valid / depth_degraded / hidden_slowdown),
  *      不再造第二套距离判据。

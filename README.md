@@ -47,6 +47,7 @@
 | 2.5D 近场地形 | `heightmap_2d5.h/.cpp` | 单平面 2.5D 高程/可通行地形 → 越障判断（能走/凸起/沟坑/太陡，P1.5；复用 P1 地面平面） |
 | 日志系统 | `logger.h` | 分级日志 DEBUG/INFO/WARN/ERROR + 时间戳 + 可选写文件（header-only，零依赖） |
 | 路径规划 | `path_planner.h/.cpp` | 导航动作 -> 速度指令映射（STOP/REACHED_GOAL 直达零速，其余经 ramp 平滑；v2.9.20 S1：降级期前进限速≤SLOW，v2.9.21 改为 ramp 后**硬上限**（首步不越限）；v2.9.23 (批B A2残)：方向反转零穿越闸门（反向命令首步到零，消除同向速度残留）；A 行为挂接（2026-10-14）：隐身障碍触发期前进限速≤SLOW（同款硬上限，默认关）；DWA 待实现） |
+| 速度仲裁 | `velocity_arbiter.h/.cpp` | **L0（v2.9.25）**：外部期望速度（Nav2/遥控）→ 安全包络。三条硬语义：① 只减不增（`|out| ≤ |desired|`，不改符号）② 不产生动作（TURN/BACKWARD 只把前进分量归零，不自己生成转向/后退）③ 不引入新阈值（只消费 `FusionResult` 既有字段）。NaN/Inf、传感器全失效、悬崖、STOP/REACHED_GOAL ⇒ 零速；超底盘能力 ⇒ 硬限幅（前进 0.20 / 后退 0.08 / 角 0.60）。**默认关**（ROS `arbiter_enable:=false`）⇒ 接入前行为逐位一致 |
 | 单元测试 | `tests/test_fusion.cpp` | F4/F5 回归 + 融合逻辑验证 (`ctest`) |
 | 点云单测 | `tests/test_point_cloud.cpp` | 反投影/坐标变换/失效哨兵验证 (`ctest`，P0) |
 | 地面分割单测 | `tests/test_ground_segmentation.cpp` | 平地/坑/台阶/门口试金石/倾斜/退化输入/`cell_skip_ransac` 新旧行为（`ctest`，P1） |
