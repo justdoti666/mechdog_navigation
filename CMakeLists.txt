@@ -139,6 +139,12 @@ target_include_directories(test_path_planner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 target_link_libraries(test_path_planner PRIVATE Threads::Threads)
 add_test(NAME path_planner_tests COMMAND test_path_planner)
 
+# L0 速度仲裁层单测 (v2.9.25): 只减不增 / 不产生动作 / fail-closed / 硬限幅 + 性质测试
+add_executable(test_velocity_arbiter tests/test_velocity_arbiter.cpp velocity_arbiter.cpp)
+target_include_directories(test_velocity_arbiter PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_velocity_arbiter PRIVATE Threads::Threads)
+add_test(NAME velocity_arbiter_tests COMMAND test_velocity_arbiter)
+
 # T5 观测工装 (N8, 2026-10-03): cell 与"整套(过 RANSAC)"两栏对照 + 外参错位/非共面统计;
 #   带自检断言 (失败 → 非零退出码), 注册进 ctest 防回归。纯算法依赖, 无 SDK / 无 GPIO。
 add_executable(cell_synth_check tools/cell_synth_check.cpp

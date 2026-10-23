@@ -133,6 +133,19 @@ struct PlannerConfig {
 };
 
 // ============================================================
+// L0 速度仲裁层 (v2.9.25) —— 外部期望速度 → 安全包络
+// ============================================================
+// 语义 (见 velocity_arbiter.h): 只减不增 / 不产生动作 / 不引入新阈值。
+// 默认关 (ROS 参数 arbiter_enable=false) ⇒ 接入前行为逐位一致。
+// 本组只放"与既有口径对齐"的比例系数, 不新增距离/时间阈值 —— 判据全部来自
+// FusionResult 既有字段 (recommended_action / cliff_detected / sensors_valid /
+// depth_degraded / hidden_slowdown)。
+struct ArbiterConfig {
+    static constexpr double slow_scale         = 0.5;  // 与 SLOW 档 / DegradedPolicyConfig::speed_scale 同口径
+    static constexpr double max_backward_scale = 0.4;  // 与 PathPlanner BACKWARD 同口径
+};
+
+// ============================================================
 // 紧急避障阈值 (来自超声波)
 // ============================================================
 struct EmergencyConfig {
