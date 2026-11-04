@@ -4,6 +4,8 @@
 
 > **环境光强判定状态（2026-08）**：TSL2591 已取消购买（见 `docs/FIX_PLAN.md` F3 决策），环境判定默认走 `estimate_ambient_light()` 深度图代理；`sensor_ir` 驱动保留为可选增强（模拟模式可用，真机 I2C 分支待硬件）。
 
+> **当前版本 `v2.9.25`**（`version.h` 单点声明，ROS 侧 `MECHDOG_CORE_VERSION_REQUIRED` 同批锁定，见「构建 → 版本单点」）｜ **2026-11-04 实测**：WSL Ubuntu 24.04 + GCC 13.3.0（Release，commit `3247c39`）`ctest` **10/10 全通过、13.9 s**，各目标运行期断言见「单元测试」。
+
 ## 项目简介
 
 本项目为四足机械狗提供实时障碍物检测与自主导航能力。系统融合**奥比中光 Astra Pro 深度相机**（单目结构光）与 **4 颗 HC-SR04 超声波传感器**，实现多距离层次、多环境自适应的传感器融合策略。
@@ -48,6 +50,8 @@
 | 日志系统 | `logger.h` | 分级日志 DEBUG/INFO/WARN/ERROR + 时间戳 + 可选写文件（header-only，零依赖） |
 | 路径规划 | `path_planner.h/.cpp` | 导航动作 -> 速度指令映射（STOP/REACHED_GOAL 直达零速，其余经 ramp 平滑；v2.9.20 S1：降级期前进限速≤SLOW，v2.9.21 改为 ramp 后**硬上限**（首步不越限）；v2.9.23 (批B A2残)：方向反转零穿越闸门（反向命令首步到零，消除同向速度残留）；A 行为挂接（2026-10-14）：隐身障碍触发期前进限速≤SLOW（同款硬上限，默认关）；DWA 待实现） |
 | 速度仲裁 | `velocity_arbiter.h/.cpp` | **L0（v2.9.25）**：外部期望速度（Nav2/遥控）→ 安全包络。三条硬语义：① 只减不增（`|out| ≤ |desired|`，不改符号）② 不产生动作（TURN/BACKWARD 只把前进分量归零，不自己生成转向/后退）③ 不引入新阈值（只消费 `FusionResult` 既有字段）。NaN/Inf、传感器全失效、悬崖、STOP/REACHED_GOAL ⇒ 零速；超底盘能力 ⇒ 硬限幅（前进 0.20 / 后退 0.08 / 角 0.60）。**默认关**（ROS `arbiter_enable:=false`）⇒ 接入前行为逐位一致 |
+| 帧指纹 | `frame_fingerprint.h` | R-8（v2.9.24）：FNV-1a 64 深度帧指纹（逐像素**显式拆字节** ⇒ 与主机端序无关；清洗口径 `lo≤v≤hi` 保留否则 0）。节点「感知:」行尾携带 `帧fp=<8hex>`，供离线工装自证"算的就是这一帧" |
+| 合成帧自检工具 | `tools/cell_synth_check.cpp` | 地面提取 / 2.5D 的合成帧回归工具（**已注册 ctest**）：外参错位 ±3/±5/±10/-15/-20°、非共面台阶 ±5/10cm、缓慢起伏 ±1/3cm 等 15 项自检；同表输出 `cell` / 整套(过 RANSAC) / `hm25` 三列对照 |
 | 单元测试 | `tests/test_fusion.cpp` | F4/F5 回归 + 融合逻辑验证 (`ctest`) |
 | 点云单测 | `tests/test_point_cloud.cpp` | 反投影/坐标变换/失效哨兵验证 (`ctest`，P0) |
 | 地面分割单测 | `tests/test_ground_segmentation.cpp` | 平地/坑/台阶/门口试金石/倾斜/退化输入/`cell_skip_ransac` 新旧行为（`ctest`，P1） |
@@ -267,6 +271,22 @@ Astra 相机深度流正常（30fps），真机深度 → 反投影 → 建图�
 
 > ⚠️ **上表未覆盖的兜底分支（真机部署前必读）**：前向三方向**全部失效**（Astra 三区域均无有效深度像素 + 三颗前向超声全无效）时，动作是 `SLOW_FORWARD` 降速盲行（≈0.1 m/s）**而非 STOP**，仅靠 bottom 悬崖检测兜底 —— 详见下方「已知限制」#7。
 
+## L0 速度仲裁（v2.9.25）
+
+`velocity_arbiter.h/.cpp` 回答一个部署问题：**本节点是「决策者」还是「安全包络」？**
+
+`safety_node` 原先由 200 ms 定时器无条件发布自己算的 action→速度，全文没有 Twist 订阅 —— 师兄的 Nav2 一旦接管 `/cmd_vel`，两路指令必然打架，或者只能把本节点停掉（等于旁路整套深度安全层）。L0 把「决策者」改成「安全包络」：输入 = 外部期望速度（Nav2 / 遥控），输出 = 过一遍感知层约束后的速度。
+
+三条硬语义（口径来源：`velocity_arbiter.h` 头注释）：
+
+- **① 只减不增** —— 任何输出分量满足 `|out| ≤ |desired|`，且不改变符号（唯一例外：输出归零）。
+- **② 不产生动作** —— 感知层的 `TURN`/`BACKWARD` 只用于**禁止前进分量**，绝不会自己生成转向或后退（那是 Nav2 的职责）。注：`determine_action` 里 `TURN`/`BACKWARD` 只在 `min_fwd ≤ 50cm` 出现（STOP ≤10cm / BACKWARD ≤25cm / TURN ≤50cm），所以"禁止前进"不会变成远距离误刹。
+- **③ 不引入新阈值** —— 只消费 `FusionResult` 既有语义（`recommended_action` / `cliff_detected` / `sensors_valid` / `depth_degraded` / `hidden_slowdown`），不造第二套距离判据。
+
+边界行为：NaN/Inf、传感器全失效、悬崖、`STOP`/`REACHED_GOAL` ⇒ **零速**；超底盘能力 ⇒ 硬限幅（前进 0.20 / 后退 0.08 / 角 0.60，m/s 与 rad/s）。实现是**无状态纯函数**（不持 ramp 状态，平滑由上游 Nav2 负责）。
+
+**默认关**（ROS 参数 `arbiter_enable:=false`）⇒ 接入前行为逐位一致；开关两态均由 `test_velocity_arbiter`（2036 断言）锁定。
+
 ## 依赖项
 
 - **CMake** >= 3.16
@@ -277,18 +297,29 @@ Astra 相机深度流正常（30fps），真机深度 → 反投影 → 建图�
 
 ## 单元测试
 
+`CMakeLists.txt` 注册 **10 个 ctest 目标**，全部零硬件依赖、可离线跑：
+
 ```bash
-# 构建并运行测试（F4 悬崖安全 / F5 读数过滤 / 融合逻辑）
-cmake --build . --target test_fusion test_point_cloud
-ctest --output-on-failure
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+cd build && ctest --output-on-failure      # ctest -N 可先列目标清单
 ```
 
-- `test_fusion` — 融合层回归（794 运行期断言，含 A 批隐身障碍×减速开关用例）
-- `test_point_cloud` — 点云模块 P0（反投影几何/内参/坐标变换/失效哨兵/轴约定，12 测试函数，30.7 万运行期断言）
-- `test_ground_segmentation` — 地面分割（153 运行期断言）/ `test_mapping` — 建图（113）/ `test_heightmap_2d5` — 2.5D（51）/ `test_path_planner` — 动作→速度映射（74）
-- `test_frame_fingerprint` — R-8 帧指纹（24 checks：端序无关 / 清洗口径 / 空帧）
+| ctest 目标 | 覆盖 | 运行期断言（2026-11-04 实测） |
+|------|------|------|
+| `test_fusion` | 融合层 F4/F5 回归 + 分层/环境权重 + A 批隐身障碍×减速开关 | 794 |
+| `test_point_cloud` | P0 反投影几何/内参/坐标变换/失效哨兵/轴约定（12 个用例） | 307 308（≈30.7 万） |
+| `test_ground_segmentation` | 平地/坑/台阶/门口试金石/倾斜/退化输入/`cell_skip_ransac` 新旧行为 | 163 |
+| `test_mapping` | 坐标换算/空帧安全/占空判定/位姿变换/多帧累积/动态清障/膨胀/PGM | 113 |
+| `test_heightmap_2d5` | 平地/凸起台阶/沟坑/fail-closed | 51 |
+| `test_frame_fingerprint` | R-8 帧指纹（端序无关 / 清洗口径 / 空帧） | 24 |
+| `test_fall_risk_relax` | U-5 `relax_missing_bottom` 语义矩阵（默认严格 = fail-closed 回归） | 10 |
+| `test_path_planner` | 动作→速度映射（STOP 直达零速 / ramp 后硬上限 / 反向零穿越） | 74 |
+| `test_velocity_arbiter` | L0 速度仲裁（只减不增 / 不产生动作 / 不引入新阈值 / 非法输入 / 悬崖与全失效） | **2036** |
+| `cell_synth_check` | 合成帧自检工具（外参错位、非共面台阶、缓慢起伏共 15 项） | 15 项自检 |
 
-> 断言数为**运行期计数**口径（WSL/Windows 两平台均 0 失败）；与"行首 CHECK 字面行数"是两套口径，引用时勿混用。
+> **口径**：断言数为**运行期计数**（测试二进制自报 `N checks, 0 failed`），与"行首 CHECK 字面行数"是两套口径，引用时勿混用。
+> **复跑记录**：`3247c39` 提交消息记 WSL+MSVC 双平台 0 失败；2026-11-04 在 WSL Ubuntu 24.04 + GCC 13.3.0（Release）复跑 **10/10 通过、13.9 s**（融合 13.2 s 占大头）。**加/改测试请同步本表**（历史上"断言数宣称与实测不符"被审查点过名，见 `docs/CODE_REVIEW_BASELINE.md`）。
 
 ## 离线重算与帧指纹配对（R-8）
 
